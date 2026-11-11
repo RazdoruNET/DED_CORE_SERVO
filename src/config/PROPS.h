@@ -13,8 +13,8 @@
 constexpr const char *PORTAL_AP_SSID = "DED_SERVO_DRIVER";
 
 // Ядро поднимает сеть сопряжения с этим префиксом: "DED_PAIR_" + хвост MAC.
-// Сеть открытая и живёт, пока на блоке нажата кнопка (см. DED CORE V4,
-// core/net/MODULE_PAIRING.h).
+// Сеть открытая и живёт, пока окно сопряжения открыто из приложения (см.
+// DED CORE V4, core/net/MODULE_PAIRING.h).
 constexpr const char *PAIR_AP_PREFIX = "DED_PAIR_";
 
 // Адрес ядра в его собственной сети и порт WebSocket.

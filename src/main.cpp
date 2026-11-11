@@ -25,7 +25,7 @@ void runPairing() {
 
   if (!PairingLink::instance().pair(credentials)) {
     SetupPortal::instance().setPairingStatus(
-        "Сеть сопряжения не найдена. Нажмите кнопку на блоке ядра и повторите.");
+        "Сеть сопряжения не найдена. Откройте в приложении «Модули» → «Найти модуль» и повторите.");
     return;
   }
 
