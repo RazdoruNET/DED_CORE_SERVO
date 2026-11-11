@@ -30,6 +30,10 @@ private:
   String buildPage() const;
   String buildStatusJson() const;
 
+  // Портал не должен отвечать, когда закрыт: сервер остаётся слушать и после
+  // остановки точки доступа, иначе страница настроек висела бы в сети ядра.
+  bool allowRequest(AsyncWebServerRequest *request) const;
+
   AsyncWebServer server_{80};
 
   bool started_ = false;

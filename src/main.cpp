@@ -84,6 +84,11 @@ void updateLinkState() {
   if (online) {
     Serial.println("CORE: телеметрия пошла");
     Settings::instance().setFailedBoots(0);
+
+    // Линк есть — открытая точка доступа портала больше не нужна.
+    if (SetupPortal::instance().active()) {
+      SetupPortal::instance().stop();
+    }
   } else {
     Serial.println("CORE: кадров нет, привод на тормозе");
   }

@@ -97,16 +97,37 @@ void SetupPortal::setPairingStatus(const String &text) {
   pairingStatus_ = text;
 }
 
+bool SetupPortal::allowRequest(AsyncWebServerRequest *request) const {
+  if (active_) {
+    return true;
+  }
+
+  request->send(403, "text/plain; charset=utf-8", "Setup portal is closed");
+  return false;
+}
+
 void SetupPortal::registerRoutes() {
   server_.on("/", HTTP_GET, [this](AsyncWebServerRequest *request) {
+    if (!allowRequest(request)) {
+      return;
+    }
+
     request->send(200, "text/html; charset=utf-8", buildPage());
   });
 
   server_.on("/status.json", HTTP_GET, [this](AsyncWebServerRequest *request) {
+    if (!allowRequest(request)) {
+      return;
+    }
+
     request->send(200, "application/json", buildStatusJson());
   });
 
   server_.on("/save", HTTP_POST, [this](AsyncWebServerRequest *request) {
+    if (!allowRequest(request)) {
+      return;
+    }
+
     const String ssid = formParam(request, "ssid");
     const String password = formParam(request, "pass");
     const String host = formParam(request, "host");
@@ -150,23 +171,39 @@ void SetupPortal::registerRoutes() {
   });
 
   server_.on("/pair", HTTP_GET, [this](AsyncWebServerRequest *request) {
+    if (!allowRequest(request)) {
+      return;
+    }
+
     pairingStatus_ = "Ищу сеть сопряжения ядра…";
     pairingRequested_ = true;
     request->redirect("/");
   });
 
-  server_.on("/fault/clear", HTTP_GET, [](AsyncWebServerRequest *request) {
+  server_.on("/fault/clear", HTTP_GET, [this](AsyncWebServerRequest *request) {
+    if (!allowRequest(request)) {
+      return;
+    }
+
     ServoAxis::instance().clearFault();
     request->redirect("/");
   });
 
   server_.on("/reset", HTTP_POST, [this](AsyncWebServerRequest *request) {
+    if (!allowRequest(request)) {
+      return;
+    }
+
     Settings::instance().clearCore();
     request->send(200, "text/html; charset=utf-8", htmlMessage("Настройки сброшены. Перезагрузка…"));
     restartAt_ = millis() + 1500;
   });
 
   server_.on("/close", HTTP_POST, [this](AsyncWebServerRequest *request) {
+    if (!allowRequest(request)) {
+      return;
+    }
+
     request->send(200, "text/html; charset=utf-8", htmlMessage("Портал закрыт."));
     stop();
   });
