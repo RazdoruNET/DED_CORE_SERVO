@@ -47,6 +47,15 @@ void CoreLink::loop() {
   socket_.loop();
 }
 
+void CoreLink::rebind() {
+  if (!started_) {
+    return;
+  }
+
+  socket_.disconnect();
+  started_ = false;
+}
+
 bool CoreLink::connected() {
   return socket_.isConnected();
 }

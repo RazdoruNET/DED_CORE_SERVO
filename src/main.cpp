@@ -91,6 +91,10 @@ void applyCoreCredentials() {
   runtime.coreProvisioned = true;
 
   WifiLink::instance().applyCredentials(ssid, password);
+
+  // В кадре мог прийти и новый адрес. Сокет, открытый на прежний, сам не
+  // переедет: следующий loop() поднимет его по сохранённым настройкам.
+  CoreLink::instance().rebind();
 }
 
 void updateLinkState() {

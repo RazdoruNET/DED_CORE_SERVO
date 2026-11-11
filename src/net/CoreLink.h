@@ -27,6 +27,10 @@ public:
   void begin(const String &host, uint16_t port);
   void loop();
 
+  // Адрес или порт ядра изменились: сокет закрывается, main.cpp поднимет его
+  // заново по сохранённым настройкам на следующем шаге loop().
+  void rebind();
+
   bool started() const { return started_; }
   bool connected();
   const CoreTelemetry &telemetry() const { return telemetry_; }
