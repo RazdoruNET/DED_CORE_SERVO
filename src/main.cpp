@@ -1,0 +1,177 @@
+#include <Arduino.h>
+
+#include "app/ServoAxis.h"
+#include "app/Status.h"
+#include "app/Tasks.h"
+#include "config/CONFIG.h"
+#include "config/PROPS.h"
+#include "net/CoreLink.h"
+#include "net/PairingLink.h"
+#include "net/Settings.h"
+#include "net/SetupPortal.h"
+#include "net/WifiLink.h"
+
+RuntimeStatus runtime;
+
+namespace {
+
+unsigned long g_pairAttemptAt = 0;
+unsigned long g_wifiDownSince = 0;
+
+void runPairing() {
+  CoreCredentials credentials;
+
+  SetupPortal::instance().setPairingStatus("Ищу сеть сопряжения ядра (DED_PAIR_*)…");
+
+  if (!PairingLink::instance().pair(credentials)) {
+    SetupPortal::instance().setPairingStatus(
+        "Сеть сопряжения не найдена. Нажмите кнопку на блоке ядра и повторите.");
+    return;
+  }
+
+  Settings::instance().saveCore(credentials.ssid,
+                                credentials.password,
+                                credentials.host,
+                                credentials.port);
+
+  runtime.coreProvisioned = true;
+  runtime.coreSsid = credentials.ssid;
+  runtime.coreHost = credentials.host;
+
+  SetupPortal::instance().setPairingStatus("Ядро найдено: " + credentials.ssid + ". Перезагрузка…");
+
+  delay(1500);
+  ESP.restart();
+}
+
+// Сопряжение ищется только когда линка нет: сканирование сетей занимает
+// секунды и на время связи с ядром не нужно.
+void schedulePairing() {
+  Settings &settings = Settings::instance();
+  const unsigned long now = millis();
+
+  if (WifiLink::instance().isConnected()) {
+    g_wifiDownSince = now;
+    return;
+  }
+
+  if (g_pairAttemptAt != 0 && static_cast<uint32_t>(now - g_pairAttemptAt) < PAIR_SCAN_INTERVAL_MS) {
+    return;
+  }
+
+  const bool unprovisioned = !settings.provisioned();
+  const bool linkLostLongEnough = settings.provisioned() &&
+                                  static_cast<uint32_t>(now - g_wifiDownSince) >= PAIR_AFTER_LINK_LOSS_MS;
+
+  if (!unprovisioned && !linkLostLongEnough) {
+    return;
+  }
+
+  g_pairAttemptAt = now;
+  runPairing();
+}
+
+void updateLinkState() {
+  const bool online = CoreLink::instance().frameFresh(LINK_TIMEOUT_MS);
+
+  if (online == runtime.linkOnline) {
+    return;
+  }
+
+  runtime.linkOnline = online;
+  ServoAxis::instance().setLinkOnline(online);
+
+  if (online) {
+    Serial.println("CORE: телеметрия пошла");
+    Settings::instance().setFailedBoots(0);
+  } else {
+    Serial.println("CORE: кадров нет, привод на тормозе");
+  }
+}
+
+void applyTelemetry() {
+  const CoreTelemetry &telemetry = CoreLink::instance().telemetry();
+
+  if (!CoreLink::instance().frameFresh(LINK_TIMEOUT_MS)) {
+    return;
+  }
+
+  // Выключенная серва в ядре означает уставку 0: привод возвращается в исходное
+  // положение, а не остаётся там, где был в момент выключения.
+  ServoAxis::instance().setPosition(telemetry.servoEnabled ? telemetry.servoPosition : 0);
+}
+
+void reportFaults() {
+  uint8_t code = 0;
+  int target = 0;
+  int position = 0;
+
+  if (!ServoAxis::instance().takeFaultReport(code, target, position)) {
+    return;
+  }
+
+  Serial.printf("SERVO: ошибка %u, цель %d, положение %d\n",
+                static_cast<unsigned>(code), target, position);
+
+  CoreLink::instance().reportServoError(code, target, position);
+}
+
+}  // namespace
+
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+
+  Serial.printf("\nDED CORE SERVO %s\n", FIRMWARE_VERSION);
+
+  ServoAxis::instance().begin();
+
+  // Контур — отдельной задачей: импульсы моста не должны ждать разбора кадров
+  // и переподключения WiFi, а loop() занят сетью.
+  xTaskCreatePinnedToCore(TaskServoCode, "ServoAxis", 4096, nullptr, 3, nullptr, 0);
+
+  Settings &settings = Settings::instance();
+  settings.begin();
+
+  // Счётчик неудачных стартов: модуль с неверным паролем ядра иначе остался бы
+  // без сети и без портала настройки.
+  const uint8_t failedBoots = settings.failedBoots();
+  settings.setFailedBoots(static_cast<uint8_t>(failedBoots + 1));
+
+  runtime.coreProvisioned = settings.provisioned();
+  runtime.coreSsid = settings.ssid();
+  runtime.coreHost = settings.host();
+
+  if (!settings.provisioned() || failedBoots >= PORTAL_AFTER_FAILED_BOOTS) {
+    Serial.println("SETUP: открыт портал настройки");
+    SetupPortal::instance().begin();
+  }
+
+  if (settings.provisioned()) {
+    WifiLink::instance().begin(settings.ssid(), settings.password());
+  }
+
+  g_wifiDownSince = millis();
+}
+
+void loop() {
+  WifiLink::instance().loop();
+  SetupPortal::instance().loop();
+
+  if (SetupPortal::instance().takePairingRequest()) {
+    runPairing();
+  }
+
+  CoreLink &core = CoreLink::instance();
+
+  if (WifiLink::instance().isConnected() && !core.started()) {
+    core.begin(Settings::instance().host(), Settings::instance().port());
+  }
+
+  core.loop();
+
+  updateLinkState();
+  applyTelemetry();
+  reportFaults();
+  schedulePairing();
+}
