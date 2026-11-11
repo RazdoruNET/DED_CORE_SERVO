@@ -116,10 +116,12 @@ bool PairingLink::pair(CoreCredentials &out, uint32_t timeoutMs) {
   const char *ssid = root["data"]["ssid"];
   const char *password = root["data"]["pass"];
   const char *host = root["data"]["host"];
+  const char *token = root["data"]["token"];
 
   out.ssid = ssid != nullptr ? String(ssid) : String();
   out.password = password != nullptr ? String(password) : String();
   out.host = host != nullptr ? String(host) : String();
+  out.token = token != nullptr ? String(token) : String();
   out.port = static_cast<uint16_t>(root["data"]["port"] | CORE_DEFAULT_PORT);
 
   if (out.host.length() == 0) {

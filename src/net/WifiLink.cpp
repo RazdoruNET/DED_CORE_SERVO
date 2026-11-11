@@ -29,6 +29,26 @@ void WifiLink::begin(const String &ssid, const String &password) {
   connect();
 }
 
+void WifiLink::applyCredentials(const String &ssid, const String &password) {
+  if (ssid.length() == 0) {
+    return;
+  }
+
+  ssid_ = ssid;
+  password_ = password;
+  online_ = false;
+
+  Serial.printf("WIFI: новые параметры сети, подключаемся к '%s'\n", ssid_.c_str());
+
+  WiFi.disconnect(false);
+  connect();
+
+  // Ядро перезапустит точку доступа через 1,5 секунды, а первая попытка уходит
+  // раньше и попадает в сеть со старым паролем. Следующую делаем через 5 секунд,
+  // а не через общий интервал повтора.
+  attemptAt_ = millis() - WIFI_RETRY_MS + 5000;
+}
+
 void WifiLink::loop() {
   if (ssid_.length() == 0) {
     return;

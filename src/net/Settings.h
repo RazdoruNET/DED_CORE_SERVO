@@ -21,6 +21,11 @@ public:
   const String &host() const { return host_; }
   uint16_t port() const { return port_; }
 
+  // Токен доверенного модуля: выдаётся при сопряжении, по нему ядро присылает
+  // новые параметры сети при смене пароля точки доступа.
+  const String &token() const { return token_; }
+  void saveToken(const String &token);
+
   void saveCore(const String &ssid, const String &password, const String &host, uint16_t port);
   void clearCore();
 
@@ -41,6 +46,7 @@ private:
   String password_;
   String host_;
   uint16_t port_ = 0;
+  String token_;
   String otaPassword_;
 };
 

@@ -1,10 +1,12 @@
 #include "net/CoreLink.h"
 
 #include <ArduinoJson.h>
+#include <WiFi.h>
 
 #include "app/Status.h"
 #include "config/CONFIG.h"
 #include "config/PROPS.h"
+#include "net/Settings.h"
 
 namespace {
 
@@ -71,6 +73,33 @@ void CoreLink::reportServoError(uint8_t code, int target, int position) {
   sendText(frame);
 }
 
+void CoreLink::sendHello() {
+  String frame = "{\"event\":\"module_hello\",\"data\":{\"mac\":\"";
+  frame += WiFi.macAddress();
+  frame += "\",\"fw\":\"";
+  frame += FIRMWARE_VERSION;
+  frame += "\",\"token\":\"";
+  frame += Settings::instance().token();
+  frame += "\"}}";
+
+  sendText(frame);
+}
+
+bool CoreLink::takeCredentials(String &ssid, String &password, String &host, uint16_t &port) {
+  if (!hasPendingCredentials_) {
+    return false;
+  }
+
+  hasPendingCredentials_ = false;
+
+  ssid = pendingSsid_;
+  password = pendingPassword_;
+  host = pendingHost_;
+  port = pendingPort_;
+
+  return true;
+}
+
 void CoreLink::sendText(String &frame) {
   socket_.sendTXT(frame);
 
@@ -87,7 +116,12 @@ void CoreLink::handleEvent(WStype_t type, uint8_t *payload, size_t length) {
   switch (type) {
     case WStype_CONNECTED:
       connected_ = true;
+      authorized_ = false;
+
       Serial.println("CORE: WebSocket подключён");
+
+      // Токен подтверждаем сразу: без него ядро не пришлёт смену сети.
+      sendHello();
       break;
 
     case WStype_DISCONNECTED:
@@ -119,13 +153,50 @@ void CoreLink::handleFrame(const char *payload, size_t length) {
   g_jsonBuffer.clear();
   JsonObject &root = g_jsonBuffer.parseObject(g_frameBuffer);
 
-  if (!root.success() || root["event"] != "message") {
+  if (!root.success()) {
+    return;
+  }
+
+  const char *event = root["event"];
+
+  if (event == nullptr) {
     return;
   }
 
   JsonObject &data = root["data"];
 
-  if (!data.success()) {
+  if (strcmp(event, "module_hello") == 0) {
+    authorized_ = (data["trusted"] | 0) != 0;
+
+    Serial.println(authorized_ ? "CORE: ядро подтвердило модуль"
+                               : "CORE: ядро не знает токен модуля");
+
+    return;
+  }
+
+  // Ядро меняет имя или пароль точки доступа и присылает новые параметры до
+  // перезапуска сети: связка не теряется, пересопряжение не нужно.
+  if (strcmp(event, "module_credentials") == 0) {
+    const char *ssid = data["ssid"];
+    const char *password = data["pass"];
+    const char *host = data["host"];
+
+    if (ssid == nullptr || password == nullptr) {
+      return;
+    }
+
+    pendingSsid_ = ssid;
+    pendingPassword_ = password;
+    pendingHost_ = host != nullptr ? String(host) : host_;
+    pendingPort_ = static_cast<uint16_t>(data["port"] | CORE_DEFAULT_PORT);
+    hasPendingCredentials_ = true;
+
+    Serial.println("CORE: ядро прислало новые параметры сети");
+
+    return;
+  }
+
+  if (strcmp(event, "message") != 0 || !data.success()) {
     return;
   }
 

@@ -13,6 +13,11 @@ public:
   static WifiLink &instance();
 
   void begin(const String &ssid, const String &password);
+
+  // Новые параметры сети от ядра: смена пароля точки доступа не должна рвать
+  // связку, поэтому модуль переподключается сам, без нового сопряжения.
+  void applyCredentials(const String &ssid, const String &password);
+
   void loop();
   void stop();
 

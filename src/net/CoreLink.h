@@ -31,6 +31,13 @@ public:
   bool connected();
   const CoreTelemetry &telemetry() const { return telemetry_; }
 
+  // Подтверждён ли модуль ядром: только доверенному модулю ядро присылает
+  // новые параметры сети при смене пароля точки доступа.
+  bool authorized() const { return authorized_; }
+
+  // Новые параметры сети, присланные ядром. true — ровно один раз на кадр.
+  bool takeCredentials(String &ssid, String &password, String &host, uint16_t &port);
+
   // true, если последний кадр пришёл не позже timeoutMs назад.
   bool frameFresh(uint32_t timeoutMs) const;
 
@@ -42,6 +49,7 @@ private:
   static void onEvent(WStype_t type, uint8_t *payload, size_t length);
   void handleEvent(WStype_t type, uint8_t *payload, size_t length);
   void handleFrame(const char *payload, size_t length);
+  void sendHello();
   void sendText(String &frame);
 
   WebSocketsClient socket_;
@@ -52,6 +60,13 @@ private:
 
   bool started_ = false;
   bool connected_ = false;
+  bool authorized_ = false;
+
+  bool hasPendingCredentials_ = false;
+  String pendingSsid_;
+  String pendingPassword_;
+  String pendingHost_;
+  uint16_t pendingPort_ = 0;
 };
 
 #endif // NET_CORE_LINK_H

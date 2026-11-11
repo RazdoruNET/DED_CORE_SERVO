@@ -34,6 +34,7 @@ void runPairing() {
                                 credentials.password,
                                 credentials.host,
                                 credentials.port);
+  Settings::instance().saveToken(credentials.token);
 
   runtime.coreProvisioned = true;
   runtime.coreSsid = credentials.ssid;
@@ -70,6 +71,27 @@ void schedulePairing() {
 
   g_pairAttemptAt = now;
   runPairing();
+}
+
+// Ядро сменило имя или пароль точки доступа и прислало новые параметры до
+// перезапуска сети: сохраняем и переподключаемся, не теряя связку.
+void applyCoreCredentials() {
+  String ssid;
+  String password;
+  String host;
+  uint16_t port = 0;
+
+  if (!CoreLink::instance().takeCredentials(ssid, password, host, port)) {
+    return;
+  }
+
+  Settings::instance().saveCore(ssid, password, host, port);
+
+  runtime.coreSsid = ssid;
+  runtime.coreHost = host;
+  runtime.coreProvisioned = true;
+
+  WifiLink::instance().applyCredentials(ssid, password);
 }
 
 void updateLinkState() {
@@ -179,6 +201,8 @@ void loop() {
   }
 
   core.loop();
+
+  applyCoreCredentials();
 
   updateLinkState();
   applyTelemetry();

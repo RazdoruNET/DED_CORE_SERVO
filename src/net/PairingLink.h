@@ -12,6 +12,9 @@ struct CoreCredentials {
   String host;
   uint16_t port = 0;
 
+  // Пропуск доверенного модуля: по нему ядро присылает смену параметров сети.
+  String token;
+
   bool valid() const;
 };
 

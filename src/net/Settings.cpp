@@ -16,6 +16,7 @@ constexpr const char *kKeyHost = "host";
 constexpr const char *kKeyPort = "port";
 constexpr const char *kKeyFails = "fails";
 constexpr const char *kKeyOtaPass = "otapw";
+constexpr const char *kKeyToken = "mtok";
 }  // namespace
 
 Settings &Settings::instance() {
@@ -63,6 +64,11 @@ void Settings::saveCore(const String &ssid, const String &password, const String
                 ssid_.c_str(), host_.c_str(), static_cast<unsigned>(port_));
 }
 
+void Settings::saveToken(const String &token) {
+  token_ = token;
+  prefs_.putString(kKeyToken, token_);
+}
+
 void Settings::clearCore() {
   ssid_ = "";
   password_ = "";
@@ -92,6 +98,7 @@ void Settings::load() {
   host_ = prefs_.getString(kKeyHost, CORE_DEFAULT_HOST);
   port_ = prefs_.getUShort(kKeyPort, CORE_DEFAULT_PORT);
   otaPassword_ = prefs_.getString(kKeyOtaPass, "");
+  token_ = prefs_.getString(kKeyToken, "");
 
   if (host_.length() == 0) {
     host_ = CORE_DEFAULT_HOST;
