@@ -122,6 +122,10 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
+  // Заводская прошивка опускала частоту до 160 МГц: модуль стоит в закрытом
+  // корпусе рядом с двигателем, лишний нагрев там ни к чему.
+  setCpuFrequencyMhz(160);
+
   Serial.printf("\nDED CORE SERVO %s\n", FIRMWARE_VERSION);
 
   ServoAxis::instance().begin();
