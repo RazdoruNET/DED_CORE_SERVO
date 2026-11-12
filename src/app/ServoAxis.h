@@ -59,12 +59,21 @@ private:
   void resetWindow();
   void raiseStall(unsigned long now);
 
+  // Импульс завершает одноразовый таймер: задача контура может быть вытеснена
+  // Wi-Fi-стеком, а длительность импульса от этого зависеть не должна.
+  static void pulseTimerCallback(void *arg);
+  void endPulse();
+
   Phase phase_ = Phase::Read;
 
   unsigned long phaseStarted_ = 0;
   uint32_t phaseDuration_ = 0;
   uint32_t pulseMs_ = 0;
   bool phaseBrakeAfter_ = false;
+
+  // Дедлайн текущего импульса в micros() и признак «выход уже переключён».
+  unsigned long pulseDeadlineUs_ = 0;
+  volatile bool pulseEnded_ = false;
 
   bool outUp_ = false;
   bool outDown_ = false;

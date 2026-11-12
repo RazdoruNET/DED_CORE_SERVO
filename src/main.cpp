@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <WiFi.h>
 
 #include "app/ServoAxis.h"
 #include "app/Status.h"
@@ -18,22 +19,29 @@ namespace {
 unsigned long g_pairAttemptAt = 0;
 unsigned long g_wifiDownSince = 0;
 
-void runPairing() {
+// explicitRequest — запуск из портала: ищем любое ядро. Автоматически после
+// потери связи ищем только то ядро, с которым уже сопряжены (по BSSID), иначе
+// чужая открытая DED_PAIR_* увела бы модуль на поддельный блок.
+void runPairing(bool explicitRequest) {
   CoreCredentials credentials;
+  Settings &settings = Settings::instance();
+
+  const String expectedBssid = explicitRequest ? String() : settings.bssid();
 
   SetupPortal::instance().setPairingStatus("Ищу сеть сопряжения ядра (DED_PAIR_*)…");
 
-  if (!PairingLink::instance().pair(credentials)) {
+  if (!PairingLink::instance().pair(credentials, expectedBssid)) {
     SetupPortal::instance().setPairingStatus(
         "Сеть сопряжения не найдена. Откройте в приложении «Модули» → «Найти модуль» и повторите.");
     return;
   }
 
-  Settings::instance().saveCore(credentials.ssid,
-                                credentials.password,
-                                credentials.host,
-                                credentials.port);
-  Settings::instance().saveToken(credentials.token);
+  settings.saveCore(credentials.ssid,
+                    credentials.password,
+                    credentials.host,
+                    credentials.port);
+  settings.saveToken(credentials.token);
+  settings.saveBssid(credentials.bssid);
 
   runtime.coreProvisioned = true;
   runtime.coreSsid = credentials.ssid;
@@ -68,8 +76,14 @@ void schedulePairing() {
     return;
   }
 
+  // Настроенный модуль без сохранённого BSSID не знает, какое ядро искать:
+  // автоматическое сопряжение выключено, новое ядро выбирают из портала.
+  if (!unprovisioned && settings.bssid().length() == 0) {
+    return;
+  }
+
   g_pairAttemptAt = now;
-  runPairing();
+  runPairing(false);
 }
 
 // Ядро сменило имя или пароль точки доступа и прислало новые параметры до
@@ -133,6 +147,14 @@ void applyTelemetry() {
 }
 
 void reportFaults() {
+  CoreLink &core = CoreLink::instance();
+
+  // Отчёт забираем только при живом сокете: takeFaultReport() сбрасывает
+  // событие, и при закрытом WS ошибка ядру уже не уйдёт.
+  if (!core.connected()) {
+    return;
+  }
+
   uint8_t code = 0;
   int target = 0;
   int position = 0;
@@ -144,7 +166,7 @@ void reportFaults() {
   Serial.printf("SERVO: ошибка %u, цель %d, положение %d\n",
                 static_cast<unsigned>(code), target, position);
 
-  CoreLink::instance().reportServoError(code, target, position);
+  core.reportServoError(code, target, position);
 }
 
 }  // namespace
@@ -152,6 +174,11 @@ void reportFaults() {
 void setup() {
   Serial.begin(115200);
   delay(100);
+
+  // До первого WiFi.mode(): режим хранения WiFi-конфига фиксируется при
+  // инициализации стека. Портал поднимает AP раньше WifiLink, и без этого
+  // параметры сопряжения писались бы в NVS.
+  WiFi.persistent(false);
 
   // Заводская прошивка опускала частоту до 160 МГц: модуль стоит в закрытом
   // корпусе рядом с двигателем, лишний нагрев там ни к чему.
@@ -194,7 +221,7 @@ void loop() {
   SetupPortal::instance().loop();
 
   if (SetupPortal::instance().takePairingRequest()) {
-    runPairing();
+    runPairing(true);
   }
 
   CoreLink &core = CoreLink::instance();

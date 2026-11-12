@@ -17,6 +17,7 @@ constexpr const char *kKeyPort = "port";
 constexpr const char *kKeyFails = "fails";
 constexpr const char *kKeyOtaPass = "otapw";
 constexpr const char *kKeyToken = "mtok";
+constexpr const char *kKeyBssid = "bssid";
 }  // namespace
 
 Settings &Settings::instance() {
@@ -25,23 +26,29 @@ Settings &Settings::instance() {
 }
 
 bool Settings::begin() {
-  if (!prefs_.begin(kNamespace, false)) {
+  const bool nvsReady = prefs_.begin(kNamespace, false);
+
+  if (nvsReady) {
+    load();
+  } else {
     Serial.println("SETTINGS: NVS недоступна");
-    return false;
   }
 
-  load();
-
+  // Пароль OTA не должен оставаться пустым даже при сбое NVS: ElegantOTA с
+  // пустым паролем отключает авторизацию, а точка доступа портала открытая.
   if (otaPassword_.length() == 0) {
     otaPassword_ = makeOtaPassword();
-    prefs_.putString(kKeyOtaPass, otaPassword_);
+
+    if (nvsReady) {
+      prefs_.putString(kKeyOtaPass, otaPassword_);
+    }
 
     // Пароль печатаем один раз: портал открытый, а обновление прошивки —
     // единственное действие, которым можно испортить модуль.
     Serial.printf("SETTINGS: пароль обновления прошивки: %s\n", otaPassword_.c_str());
   }
 
-  return true;
+  return nvsReady;
 }
 
 bool Settings::provisioned() const {
@@ -58,7 +65,7 @@ void Settings::saveCore(const String &ssid, const String &password, const String
   prefs_.putString(kKeyPass, password_);
   prefs_.putString(kKeyHost, host_);
   prefs_.putUShort(kKeyPort, port_);
-  prefs_.putUChar(kKeyFails, 0);
+  setFailedBoots(0);
 
   Serial.printf("SETTINGS: ядро '%s' (%s:%u) сохранено\n",
                 ssid_.c_str(), host_.c_str(), static_cast<unsigned>(port_));
@@ -67,6 +74,11 @@ void Settings::saveCore(const String &ssid, const String &password, const String
 void Settings::saveToken(const String &token) {
   token_ = token;
   prefs_.putString(kKeyToken, token_);
+}
+
+void Settings::saveBssid(const String &bssid) {
+  bssid_ = bssid;
+  prefs_.putString(kKeyBssid, bssid_);
 }
 
 void Settings::clearCore() {
@@ -79,17 +91,21 @@ void Settings::clearCore() {
   prefs_.remove(kKeyPass);
   prefs_.remove(kKeyHost);
   prefs_.remove(kKeyPort);
-  prefs_.putUChar(kKeyFails, 0);
+  prefs_.remove(kKeyBssid);
+  bssid_ = "";
+
+  setFailedBoots(0);
 
   Serial.println("SETTINGS: настройки ядра сброшены");
 }
 
-uint8_t Settings::failedBoots() {
-  return prefs_.getUChar(kKeyFails, 0);
-}
-
 void Settings::setFailedBoots(uint8_t value) {
-  prefs_.putUChar(kKeyFails, value);
+  if (value == failedBoots_) {
+    return;
+  }
+
+  failedBoots_ = value;
+  prefs_.putUChar(kKeyFails, failedBoots_);
 }
 
 void Settings::load() {
@@ -99,6 +115,8 @@ void Settings::load() {
   port_ = prefs_.getUShort(kKeyPort, CORE_DEFAULT_PORT);
   otaPassword_ = prefs_.getString(kKeyOtaPass, "");
   token_ = prefs_.getString(kKeyToken, "");
+  bssid_ = prefs_.getString(kKeyBssid, "");
+  failedBoots_ = prefs_.getUChar(kKeyFails, 0);
 
   if (host_.length() == 0) {
     host_ = CORE_DEFAULT_HOST;

@@ -29,6 +29,53 @@ String htmlMessage(const String &text) {
          "<p><a style=\"color:#6ea8ff\" href=\"/\">Назад</a></p></body></html>";
 }
 
+// SSID и адрес ядра приходят из формы и из кадра сопряжения, то есть не
+// доверены: кавычка в SSID ломала бы страницу и JSON, а разметка — исполнялась.
+String htmlEscape(const String &value) {
+  String out;
+
+  for (size_t i = 0; i < value.length(); ++i) {
+    switch (value[i]) {
+      case '&': out += "&amp;"; break;
+      case '<': out += "&lt;"; break;
+      case '>': out += "&gt;"; break;
+      case '"': out += "&quot;"; break;
+      case '\'': out += "&#39;"; break;
+      default: out += value[i]; break;
+    }
+  }
+
+  return out;
+}
+
+String jsonEscape(const String &value) {
+  String out;
+  out.reserve(value.length() + 8);
+
+  for (size_t i = 0; i < value.length(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(value[i]);
+
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (c < 0x20) {
+          char escaped[7];
+          snprintf(escaped, sizeof(escaped), "\\u%04x", c);
+          out += escaped;
+        } else {
+          out += static_cast<char>(c);
+        }
+        break;
+    }
+  }
+
+  return out;
+}
+
 }  // namespace
 
 SetupPortal &SetupPortal::instance() {
@@ -50,6 +97,11 @@ void SetupPortal::begin() {
   // AP+STA: портал может быть открыт, пока модуль уже подключён к ядру,
   // и терять этот линк из-за настройки нельзя.
   WiFi.mode(WIFI_AP_STA);
+
+  // Своя подсеть: сеть ядра — 192.168.4.0/24, и в AP+STA совпадающие подсети
+  // делают маршрут до ядра зависимым от порядка интерфейсов в lwIP.
+  static const IPAddress portalIp(192, 168, 5, 1);
+  WiFi.softAPConfig(portalIp, portalIp, IPAddress(255, 255, 255, 0));
   WiFi.softAP(PORTAL_AP_SSID);
 
   active_ = true;
@@ -209,6 +261,8 @@ void SetupPortal::registerRoutes() {
   });
 
   // Обновление прошивки закрыто паролем из NVS: точка доступа портала открытая.
+  // Маршрут /update регистрирует ElegantOTA, поэтому он отвечает и после
+  // закрытия портала — из сети ядра, но только с паролем.
   ElegantOTA.begin(&server_, "admin", Settings::instance().otaPassword().c_str());
 }
 
@@ -222,7 +276,6 @@ String SetupPortal::buildPage() const {
 
   page += "<!DOCTYPE html><html lang=\"ru\"><head><meta charset=\"utf-8\">";
   page += "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
-  page += "<meta http-equiv=\"refresh\" content=\"5\">";
   page += "<title>DED SERVO</title><style>";
   page += "body{font-family:system-ui,sans-serif;margin:0;padding:16px;background:#111;color:#eee}";
   page += "h1{font-size:19px;margin:0 0 14px}table{border-collapse:collapse;width:100%;margin-bottom:14px}";
@@ -242,11 +295,11 @@ String SetupPortal::buildPage() const {
   page += "</td></tr>";
 
   page += "<tr><td>Ядро</td><td>";
-  page += (provisioned ? settings.ssid() : String("не настроено"));
+  page += (provisioned ? htmlEscape(settings.ssid()) : String("не настроено"));
   page += "</td></tr>";
 
   page += "<tr><td>Адрес ядра</td><td>";
-  page += settings.host();
+  page += htmlEscape(settings.host());
   page += ":";
   page += String(settings.port());
   page += "</td></tr>";
@@ -282,13 +335,13 @@ String SetupPortal::buildPage() const {
 
   page += "<form method=\"post\" action=\"/save\">";
   page += "<input name=\"ssid\" placeholder=\"Имя точки доступа ядра\" value=\"";
-  page += (provisioned ? settings.ssid() : String(""));
+  page += (provisioned ? htmlEscape(settings.ssid()) : String(""));
   page += "\">";
   page += "<input name=\"pass\" type=\"password\" autocomplete=\"new-password\" placeholder=\"";
   page += (provisioned ? "Пароль ядра (пусто — не менять)" : "Пароль точки доступа ядра");
   page += "\">";
   page += "<input name=\"host\" placeholder=\"Адрес ядра\" value=\"";
-  page += settings.host();
+  page += htmlEscape(settings.host());
   page += "\">";
   page += "<input name=\"port\" placeholder=\"Порт WebSocket\" value=\"";
   page += String(settings.port());
@@ -304,12 +357,19 @@ String SetupPortal::buildPage() const {
 
   if (pairingStatus_.length() > 0) {
     page += "<p class=\"note\">";
-    page += pairingStatus_;
+    page += htmlEscape(pairingStatus_);
     page += "</p>";
   }
 
   page += "<p class=\"note\">Сопряжение: в приложении блока откройте «Модули» и нажмите "
           "«Найти модуль», затем нажмите «Найти ядро сопряжением». Сеть сопряжения живёт около минуты.</p>";
+
+  // Обновляем страницу, только пока в неё не вводят: автообновление стирало
+  // набранный пароль.
+  page += "<script>setTimeout(function(){var busy=false;"
+          "document.querySelectorAll('input').forEach(function(el){"
+          "if(el.value||el===document.activeElement)busy=true;});"
+          "if(!busy)location.reload();},5000);</script>";
 
   page += "</body></html>";
 
@@ -322,8 +382,8 @@ String SetupPortal::buildStatusJson() const {
   String json = "{\"event\":\"status\",\"data\":{";
   json += "\"fw\":\"" FIRMWARE_VERSION "\",";
   json += "\"link\":" + String(runtime.linkOnline ? 1 : 0) + ",";
-  json += "\"core_ssid\":\"" + settings.ssid() + "\",";
-  json += "\"core_host\":\"" + settings.host() + "\",";
+  json += "\"core_ssid\":\"" + jsonEscape(settings.ssid()) + "\",";
+  json += "\"core_host\":\"" + jsonEscape(settings.host()) + "\",";
   json += "\"servo\":" + String(runtime.servoPercent) + ",";
   json += "\"target\":" + String(runtime.targetAdc) + ",";
   json += "\"position\":" + String(runtime.positionAdc) + ",";

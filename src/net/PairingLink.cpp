@@ -16,7 +16,7 @@ PairingLink &PairingLink::instance() {
   return link;
 }
 
-bool PairingLink::pair(CoreCredentials &out, uint32_t timeoutMs) {
+bool PairingLink::pair(CoreCredentials &out, const String &expectedBssid, uint32_t timeoutMs) {
   const unsigned long started = millis();
 
   if (WiFi.getMode() == WIFI_OFF) {
@@ -34,6 +34,14 @@ bool PairingLink::pair(CoreCredentials &out, uint32_t timeoutMs) {
       continue;
     }
 
+    // Своё ядро узнаём по BSSID: без этой проверки любая открытая DED_PAIR_*
+    // в радиусе увела бы настроенный модуль на поддельный блок.
+    const String bssid = WiFi.BSSIDstr(i);
+
+    if (expectedBssid.length() > 0 && !bssid.equalsIgnoreCase(expectedBssid)) {
+      continue;
+    }
+
     const int rssi = WiFi.RSSI(i);
 
     if (rssi > bestRssi) {
@@ -43,19 +51,23 @@ bool PairingLink::pair(CoreCredentials &out, uint32_t timeoutMs) {
   }
 
   String apSsid;
+  String apBssid;
 
   if (best >= 0) {
     apSsid = WiFi.SSID(best);
+    apBssid = WiFi.BSSIDstr(best);
   }
 
   WiFi.scanDelete();
 
   if (apSsid.length() == 0) {
-    Serial.println("PAIR: сеть DED_PAIR_* не найдена");
+    Serial.println(expectedBssid.length() > 0
+                       ? "PAIR: сеть сопряжения этого ядра не найдена"
+                       : "PAIR: сеть DED_PAIR_* не найдена");
     return false;
   }
 
-  Serial.printf("PAIR: найдена '%s', подключаемся\n", apSsid.c_str());
+  Serial.printf("PAIR: найдена '%s' (%s), подключаемся\n", apSsid.c_str(), apBssid.c_str());
 
   // Сеть сопряжения открытая: пароля нет по устройству протокола. Секретов,
   // кроме параметров точки доступа, она не отдаёт и живёт только пока открыто
@@ -122,6 +134,7 @@ bool PairingLink::pair(CoreCredentials &out, uint32_t timeoutMs) {
   out.password = password != nullptr ? String(password) : String();
   out.host = host != nullptr ? String(host) : String();
   out.token = token != nullptr ? String(token) : String();
+  out.bssid = apBssid;
   out.port = static_cast<uint16_t>(root["data"]["port"] | CORE_DEFAULT_PORT);
 
   if (out.host.length() == 0) {

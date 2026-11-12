@@ -1,8 +1,18 @@
 #include "app/ServoAxis.h"
 
+#include <esp_timer.h>
+
 #include "app/Status.h"
 #include "config/CONFIG.h"
 #include "config/PINS.h"
+
+namespace {
+
+// Одноразовый таймер на импульс. Создаётся в begin(); если создать не удалось,
+// длительность импульса считается по тикам, как раньше.
+esp_timer_handle_t g_pulseTimer = nullptr;
+
+}  // namespace
 
 ServoAxis &ServoAxis::instance() {
   static ServoAxis axis;
@@ -18,6 +28,15 @@ void ServoAxis::begin() {
   // Датчик питается от 3,3 В: без полного затухания верхний край хода упирался
   // бы в потолок ADC и привод «слеп» у максимума.
   analogSetPinAttenuation(PIN_POSITION, ADC_11db);
+
+  esp_timer_create_args_t timerArgs = {};
+  timerArgs.callback = &ServoAxis::pulseTimerCallback;
+  timerArgs.name = "servoPulse";
+
+  if (esp_timer_create(&timerArgs, &g_pulseTimer) != ESP_OK) {
+    g_pulseTimer = nullptr;
+    Serial.println("SERVO: таймер импульсов недоступен, длительность по тикам");
+  }
 
   setOutput(Direction::None, true);
   digitalWrite(PIN_DRIVER_ENABLE, HIGH);
@@ -106,9 +125,13 @@ void ServoAxis::update() {
       break;
 
     case Phase::Pulse:
-      if (static_cast<uint32_t>(now - phaseStarted_) >= phaseDuration_) {
-        setOutput(Direction::None, phaseBrakeAfter_);
+      // Выход переключает таймер; здесь только переходим к паузе. Если таймера
+      // нет (или он не создался), импульс завершается по дедлайну.
+      if (!pulseEnded_ && static_cast<int32_t>(micros() - pulseDeadlineUs_) >= 0) {
+        endPulse();
+      }
 
+      if (pulseEnded_) {
         phase_ = Phase::Rest;
         phaseStarted_ = now;
         phaseDuration_ = phaseBrakeAfter_ ? pulseMs_ : PULSE_COAST_MS;
@@ -179,15 +202,53 @@ void ServoAxis::handleRead(unsigned long now) {
 void ServoAxis::startPulse(Direction direction, uint32_t pulseMs, bool brakeAfter, unsigned long now) {
   pulseMs_ = pulseMs;
   phaseBrakeAfter_ = brakeAfter;
+  pulseEnded_ = false;
+
+  // Дедлайн — до перевода фазы в Pulse: запоздавший callback прошлого импульса
+  // увидит новую фазу с уже будущим дедлайном и новый импульс не оборвёт.
+  pulseDeadlineUs_ = micros() + pulseMs * 1000;
 
   setOutput(direction, false);
 
   phase_ = Phase::Pulse;
   phaseStarted_ = now;
   phaseDuration_ = pulseMs;
+
+  if (g_pulseTimer != nullptr) {
+    esp_timer_stop(g_pulseTimer);
+    esp_timer_start_once(g_pulseTimer, static_cast<uint64_t>(pulseMs) * 1000);
+  }
+}
+
+void ServoAxis::endPulse() {
+  if (phase_ != Phase::Pulse) {
+    return;
+  }
+
+  // Запоздавший callback прошлого импульса: дедлайн ещё не наступил.
+  if (static_cast<int32_t>(micros() - pulseDeadlineUs_) < 0) {
+    return;
+  }
+
+  // Линк мог пропасть в середине импульса: тогда тормоз важнее выбега.
+  setOutput(Direction::None, (!linkOnline_ || latched_) ? true : phaseBrakeAfter_);
+  pulseEnded_ = true;
+}
+
+void ServoAxis::pulseTimerCallback(void *arg) {
+  (void) arg;
+
+  ServoAxis::instance().endPulse();
 }
 
 void ServoAxis::holdBrake(unsigned long now) {
+  if (phase_ == Phase::Pulse && g_pulseTimer != nullptr) {
+    esp_timer_stop(g_pulseTimer);
+  }
+
+  // Запоздавший callback не должен вернуть выбег после тормоза.
+  pulseEnded_ = true;
+
   setOutput(Direction::None, true);
 
   phase_ = Phase::Rest;

@@ -26,10 +26,15 @@ public:
   const String &token() const { return token_; }
   void saveToken(const String &token);
 
+  // BSSID точки сопряжения ядра. По нему автоматическое пересопряжение находит
+  // только своё ядро, а не любую открытую DED_PAIR_* в радиусе.
+  const String &bssid() const { return bssid_; }
+  void saveBssid(const String &bssid);
+
   void saveCore(const String &ssid, const String &password, const String &host, uint16_t port);
   void clearCore();
 
-  uint8_t failedBoots();
+  uint8_t failedBoots() const { return failedBoots_; }
   void setFailedBoots(uint8_t value);
 
   const String &otaPassword() const { return otaPassword_; }
@@ -47,7 +52,12 @@ private:
   String host_;
   uint16_t port_ = 0;
   String token_;
+  String bssid_;
   String otaPassword_;
+
+  // Кэш счётчика: NVS пишется только при изменении значения, иначе «мигающий»
+  // линк изнашивал бы flash на каждом переходе в online.
+  uint8_t failedBoots_ = 0;
 };
 
 #endif // NET_SETTINGS_H
