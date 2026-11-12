@@ -84,31 +84,32 @@ SetupPortal &SetupPortal::instance() {
 }
 
 void SetupPortal::begin() {
+  if (!active_) {
+    // AP+STA: портал может быть открыт, пока модуль уже подключён к ядру,
+    // и терять этот линк из-за настройки нельзя.
+    //
+    // Wi-Fi поднимается до server_.begin(): AsyncServer сразу создаёт сокет
+    // через tcpip_api_call, а без инициализированного lwIP это assert и bootloop.
+    WiFi.mode(WIFI_AP_STA);
+
+    // Своя подсеть: сеть ядра — 192.168.4.0/24, и в AP+STA совпадающие подсети
+    // делают маршрут до ядра зависимым от порядка интерфейсов в lwIP.
+    static const IPAddress portalIp(192, 168, 5, 1);
+    WiFi.softAPConfig(portalIp, portalIp, IPAddress(255, 255, 255, 0));
+    WiFi.softAP(PORTAL_AP_SSID);
+
+    active_ = true;
+    pairingStatus_ = "";
+
+    Serial.printf("SETUP: сеть '%s', страница http://%s/\n",
+                  PORTAL_AP_SSID, WiFi.softAPIP().toString().c_str());
+  }
+
   if (!started_) {
     registerRoutes();
     server_.begin();
     started_ = true;
   }
-
-  if (active_) {
-    return;
-  }
-
-  // AP+STA: портал может быть открыт, пока модуль уже подключён к ядру,
-  // и терять этот линк из-за настройки нельзя.
-  WiFi.mode(WIFI_AP_STA);
-
-  // Своя подсеть: сеть ядра — 192.168.4.0/24, и в AP+STA совпадающие подсети
-  // делают маршрут до ядра зависимым от порядка интерфейсов в lwIP.
-  static const IPAddress portalIp(192, 168, 5, 1);
-  WiFi.softAPConfig(portalIp, portalIp, IPAddress(255, 255, 255, 0));
-  WiFi.softAP(PORTAL_AP_SSID);
-
-  active_ = true;
-  pairingStatus_ = "";
-
-  Serial.printf("SETUP: сеть '%s', страница http://%s/\n",
-                PORTAL_AP_SSID, WiFi.softAPIP().toString().c_str());
 }
 
 void SetupPortal::stop() {
