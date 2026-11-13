@@ -352,6 +352,15 @@ void SetupPortal::registerRoutes() {
     request->redirect("/");
   });
 
+  server_.on("/calibrate", HTTP_POST, [this](AsyncWebServerRequest *request) {
+    if (!allowRequest(request) || !checkCsrf(request)) {
+      return;
+    }
+
+    ServoAxis::instance().requestCalibration();
+    request->redirect("/");
+  });
+
   server_.on("/reset", HTTP_POST, [this](AsyncWebServerRequest *request) {
     if (!allowRequest(request) || !checkCsrf(request)) {
       return;
@@ -438,6 +447,21 @@ String SetupPortal::buildPage() const {
                      ", попытка " + String(static_cast<unsigned>(runtime.faultAttempts)));
   page += "</td></tr>";
 
+  page += "<tr><td>Крайние положения</td><td>";
+  if (runtime.calibrating) {
+    page += "идёт калибровка…";
+  } else if (runtime.calibrated) {
+    page += String(runtime.calMin);
+    page += "…";
+    page += String(runtime.calMax);
+    page += " ADC";
+  } else {
+    page += "не определены (0…";
+    page += String(POSITION_ADC_MAX);
+    page += ")";
+  }
+  page += "</td></tr>";
+
   page += "<tr><td>Кадров от ядра</td><td>";
   page += String(runtime.frames);
   page += "</td></tr>";
@@ -480,6 +504,12 @@ String SetupPortal::buildPage() const {
   page += csrfToken_;
   page += "\">";
   page += "<button class=\"ghost\" type=\"submit\">Сбросить ошибку привода</button></form>";
+
+  page += "<form method=\"post\" action=\"/calibrate\">";
+  page += "<input type=\"hidden\" name=\"csrf\" value=\"";
+  page += csrfToken_;
+  page += "\">";
+  page += "<button class=\"ghost\" type=\"submit\">Калибровать крайние положения</button></form>";
 
   page += "<a class=\"btn ghost\" href=\"/update\">Обновление прошивки</a>";
 
@@ -526,6 +556,10 @@ String SetupPortal::buildStatusJson() const {
   json += "\"position\":" + String(runtime.positionAdc) + ",";
   json += "\"fault\":" + String(static_cast<unsigned>(runtime.fault)) + ",";
   json += "\"fault_attempts\":" + String(static_cast<unsigned>(runtime.faultAttempts)) + ",";
+  json += "\"calibrating\":" + String(runtime.calibrating ? 1 : 0) + ",";
+  json += "\"calibrated\":" + String(runtime.calibrated ? 1 : 0) + ",";
+  json += "\"cal_min\":" + String(runtime.calMin) + ",";
+  json += "\"cal_max\":" + String(runtime.calMax) + ",";
   json += "\"frames\":" + String(runtime.frames);
   json += "}}";
 

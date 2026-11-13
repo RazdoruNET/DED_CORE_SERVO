@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 
+#include "config/CONFIG.h"
+
 // Код ошибки привода. Ноль — ошибки нет; значение уходит ядру в кадре
 // servo_error (см. docs/PROTOCOL.md).
 enum class FaultCode : uint8_t {
@@ -33,6 +35,10 @@ public:
   // Снять защёлкнутую ошибку вручную.
   void clearFault();
 
+  // Найти крайние положения заново: привод прогоняется от упора до упора,
+  // результат ложится в NVS. Выполняется в задаче контура, линк не нужен.
+  void requestCalibration();
+
   // Шаг контура. Вызывается из задачи каждые CONTROL_TICK_MS.
   void update();
 
@@ -47,6 +53,7 @@ public:
 private:
   enum class Phase : uint8_t { Read, Pulse, Rest };
   enum class Direction : int8_t { Up = -1, Down = 1, None = 0 };
+  enum class CalLeg : uint8_t { None, Low, High };
 
   ServoAxis() = default;
 
@@ -56,8 +63,16 @@ private:
   // состояние контура здесь, в задаче привода: менять его из двух задач сразу
   // значило бы ловить защёлку с половиной сброшенных полей.
   void applyRequests();
-  void applyTarget(int target);
+  void applyTarget(int percent);
   void applyClearRequest();
+
+  // Поиск упоров: короткие импульсы в одну сторону, пока привод не перестанет
+  // двигаться (или пока не выйдет время), затем то же в другую.
+  void beginCalibration();
+  void handleCalibrationRead(unsigned long now);
+  void finishCalibrationLeg(unsigned long now);
+
+  void runPhase(unsigned long now);
 
   void handleRead(unsigned long now);
   void startPulse(Direction direction, uint32_t pulseMs, bool brakeAfter, unsigned long now);
@@ -95,9 +110,10 @@ private:
 
   // Признаки из loop(), защищены stateMux_.
   bool linkOnline_ = false;
-  int pendingTarget_ = 0;
+  int pendingPercent_ = 0;
   bool pendingTargetValid_ = false;
   bool clearRequested_ = false;
+  bool calRequested_ = false;
 
   bool reportPending_ = false;
   uint8_t reportCode_ = 0;
@@ -106,6 +122,16 @@ private:
 
   // Копия состояния линка в задаче контура: переход ловится здесь.
   bool linkOnlineSeen_ = false;
+
+  // Шкала ядра ложится на найденные упоры, а не на весь диапазон датчика.
+  int adcMin_ = 0;
+  int adcMax_ = POSITION_ADC_MAX;
+
+  bool calibrating_ = false;
+  CalLeg calLeg_ = CalLeg::None;
+  Direction calDirection_ = Direction::Up;
+  unsigned long calLegStarted_ = 0;
+  int calLowSeen_ = 0;
 
   int position_ = 0;
   int lastPosition_ = 0;

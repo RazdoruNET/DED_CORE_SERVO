@@ -46,6 +46,13 @@ public:
   void saveCore(const String &ssid, const String &password, const String &host, uint16_t port);
   void clearCore();
 
+  // Крайние положения привода, найденные при первом включении. Привязка к
+  // механике, а не к ядру: при сбросе настроек ядра калибровка сохраняется.
+  bool calibrated() const;
+  uint16_t adcMin() const;
+  uint16_t adcMax() const;
+  void saveCalibration(uint16_t min, uint16_t max);
+
   uint8_t failedBoots() const;
   void setFailedBoots(uint8_t value);
 
@@ -75,6 +82,10 @@ private:
   String bssid_;
   String pairCode_;
   String otaPassword_;
+
+  bool calibrated_ = false;
+  uint16_t adcMin_ = 0;
+  uint16_t adcMax_ = 0;
 
   // Кэш счётчика: NVS пишется только при изменении значения, иначе «мигающий»
   // линк изнашивал бы flash на каждом переходе в online.

@@ -203,6 +203,11 @@ void setup() {
 
   Serial.printf("\nDED CORE SERVO %s\n", FIRMWARE_VERSION);
 
+  // Настройки — до ServoAxis::begin(): контур берёт оттуда найденные крайние
+  // положения, а без калибровки запускает её при первом включении.
+  Settings &settings = Settings::instance();
+  settings.begin();
+
   ServoAxis::instance().begin();
 
   // Контур — отдельной задачей: импульсы моста не должны ждать разбора кадров
@@ -211,9 +216,6 @@ void setup() {
     // Без задачи привод не стронется с тормоза: молчать об этом нельзя.
     Serial.println("SERVO: задача контура не создана, привод не работает");
   }
-
-  Settings &settings = Settings::instance();
-  settings.begin();
 
   // Счётчик неудачных стартов: модуль с неверным паролем ядра иначе остался бы
   // без сети и без портала настройки.

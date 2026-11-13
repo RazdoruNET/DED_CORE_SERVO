@@ -2,6 +2,7 @@
 
 #include <esp_random.h>
 
+#include "config/CONFIG.h"
 #include "config/PROPS.h"
 
 namespace {
@@ -19,6 +20,9 @@ constexpr const char *kKeyOtaPass = "otapw";
 constexpr const char *kKeyToken = "mtok";
 constexpr const char *kKeyBssid = "bssid";
 constexpr const char *kKeyPairCode = "paircode";
+constexpr const char *kKeyAdcMin = "adcmin";
+constexpr const char *kKeyAdcMax = "adcmax";
+constexpr const char *kKeyCalOk = "calok";
 }  // namespace
 
 Settings &Settings::instance() {
@@ -221,6 +225,47 @@ void Settings::setFailedBoots(uint8_t value) {
   unlock();
 }
 
+bool Settings::calibrated() const {
+  lock();
+  const bool value = calibrated_;
+  unlock();
+
+  return value;
+}
+
+uint16_t Settings::adcMin() const {
+  lock();
+  const uint16_t value = adcMin_;
+  unlock();
+
+  return value;
+}
+
+uint16_t Settings::adcMax() const {
+  lock();
+  const uint16_t value = adcMax_;
+  unlock();
+
+  return value;
+}
+
+void Settings::saveCalibration(uint16_t min, uint16_t max) {
+  lock();
+
+  adcMin_ = min;
+  adcMax_ = max;
+  calibrated_ = true;
+
+  prefs_.putUShort(kKeyAdcMin, adcMin_);
+  prefs_.putUShort(kKeyAdcMax, adcMax_);
+  prefs_.putUChar(kKeyCalOk, 1);
+
+  unlock();
+
+  Serial.printf("SETTINGS: крайние положения %u…%u ADC сохранены\n",
+                static_cast<unsigned>(min), static_cast<unsigned>(max));
+}
+
 void Settings::load() {
   ssid_ = prefs_.getString(kKeySsid, "");
   password_ = prefs_.getString(kKeyPass, "");
@@ -231,6 +276,11 @@ void Settings::load() {
   bssid_ = prefs_.getString(kKeyBssid, "");
   pairCode_ = prefs_.getString(kKeyPairCode, "");
   failedBoots_ = prefs_.getUChar(kKeyFails, 0);
+
+  adcMin_ = prefs_.getUShort(kKeyAdcMin, 0);
+  adcMax_ = prefs_.getUShort(kKeyAdcMax, 0);
+  calibrated_ = prefs_.getUChar(kKeyCalOk, 0) != 0 &&
+                static_cast<int>(adcMax_) - static_cast<int>(adcMin_) >= CAL_MIN_SPAN;
 
   if (host_.length() == 0) {
     host_ = CORE_DEFAULT_HOST;

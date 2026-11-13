@@ -5,6 +5,7 @@
 #include "app/Status.h"
 #include "config/CONFIG.h"
 #include "config/PINS.h"
+#include "net/Settings.h"
 
 namespace {
 
@@ -41,24 +42,41 @@ void ServoAxis::begin() {
   setOutput(Direction::None, true);
   digitalWrite(PIN_DRIVER_ENABLE, HIGH);
 
+  // Шкала ядра ложится на найденный при первом включении ход. Пока калибровки
+  // нет, работает весь диапазон датчика — как у заводской прошивки.
+  Settings &settings = Settings::instance();
+
+  if (settings.calibrated()) {
+    adcMin_ = settings.adcMin();
+    adcMax_ = settings.adcMax();
+  }
+
+  runtime.calibrated = settings.calibrated();
+  runtime.calMin = adcMin_;
+  runtime.calMax = adcMax_;
+
   position_ = readPosition();
   lastPosition_ = position_;
   target_ = position_;
 
   runtime.positionAdc = position_;
   runtime.targetAdc = target_;
+
+  // Первое включение: крайние положения ещё не известны.
+  if (!settings.calibrated()) {
+    calRequested_ = true;
+  }
 }
 
 void ServoAxis::setPosition(int percent) {
   percent = constrain(percent, 0, SERVO_SOURCE_MAX);
 
-  const int target = static_cast<int>((static_cast<long>(percent) * POSITION_ADC_MAX) / SERVO_SOURCE_MAX);
-
   runtime.servoPercent = percent;
-  runtime.targetAdc = target;
 
+  // Уставку применяет задача контура: снимать защёлку ошибки из loop() значило
+  // бы менять её состояние из двух задач сразу.
   portENTER_CRITICAL(&stateMux_);
-  pendingTarget_ = target;
+  pendingPercent_ = percent;
   pendingTargetValid_ = true;
   portEXIT_CRITICAL(&stateMux_);
 }
@@ -75,18 +93,27 @@ void ServoAxis::clearFault() {
   portEXIT_CRITICAL(&stateMux_);
 }
 
+void ServoAxis::requestCalibration() {
+  portENTER_CRITICAL(&stateMux_);
+  calRequested_ = true;
+  portEXIT_CRITICAL(&stateMux_);
+}
+
 void ServoAxis::applyRequests() {
-  int target = 0;
+  int percent = 0;
   bool hasTarget = false;
   bool clear = false;
+  bool calibrate = false;
   bool online = false;
 
   portENTER_CRITICAL(&stateMux_);
   hasTarget = pendingTargetValid_;
-  target = pendingTarget_;
+  percent = pendingPercent_;
   pendingTargetValid_ = false;
   clear = clearRequested_;
   clearRequested_ = false;
+  calibrate = calRequested_;
+  calRequested_ = false;
   online = linkOnline_;
   portEXIT_CRITICAL(&stateMux_);
 
@@ -95,16 +122,26 @@ void ServoAxis::applyRequests() {
     resetWindow();
   }
 
+  if (calibrate && !calibrating_) {
+    beginCalibration();
+  }
+
   if (clear) {
     applyClearRequest();
   }
 
   if (hasTarget) {
-    applyTarget(target);
+    applyTarget(percent);
   }
 }
 
-void ServoAxis::applyTarget(int target) {
+void ServoAxis::applyTarget(int percent) {
+  const int span = adcMax_ - adcMin_;
+
+  const int target = adcMin_ + static_cast<int>((static_cast<long>(percent) * span) / SERVO_SOURCE_MAX);
+
+  runtime.targetAdc = target;
+
   if (target == target_) {
     return;
   }
@@ -147,6 +184,12 @@ void ServoAxis::update() {
 
   applyRequests();
 
+  // Калибровка идёт без линка и без уставки: привод сам ищет упоры.
+  if (calibrating_) {
+    runPhase(now);
+    return;
+  }
+
   if (!linkOnlineSeen_ || latched_) {
     holdBrake(now);
     return;
@@ -162,9 +205,17 @@ void ServoAxis::update() {
     resetWindow();
   }
 
+  runPhase(now);
+}
+
+void ServoAxis::runPhase(unsigned long now) {
   switch (phase_) {
     case Phase::Read:
-      handleRead(now);
+      if (calibrating_) {
+        handleCalibrationRead(now);
+      } else {
+        handleRead(now);
+      }
       break;
 
     case Phase::Pulse:
@@ -192,6 +243,111 @@ void ServoAxis::update() {
       }
       break;
   }
+}
+
+void ServoAxis::beginCalibration() {
+  if (g_pulseTimer != nullptr) {
+    esp_timer_stop(g_pulseTimer);
+  }
+
+  portENTER_CRITICAL(&stateMux_);
+  pulseEnded_ = true;
+  phase_ = Phase::Read;
+  portEXIT_CRITICAL(&stateMux_);
+
+  setOutput(Direction::None, true);
+
+  calibrating_ = true;
+  calLeg_ = CalLeg::Low;
+  calDirection_ = Direction::Up;
+  calLegStarted_ = millis();
+  calLowSeen_ = position_;
+
+  // Попутно снимаем всё, что могло остаться от прошлой работы.
+  fault_ = FaultCode::None;
+  attempts_ = 0;
+  latched_ = false;
+  retryPending_ = false;
+
+  runtime.fault = 0;
+  runtime.faultAttempts = 0;
+  runtime.calibrating = true;
+
+  resetWindow();
+
+  Serial.println("SERVO: калибровка крайних положений");
+}
+
+void ServoAxis::handleCalibrationRead(unsigned long now) {
+  position_ = readPosition();
+  runtime.positionAdc = position_;
+
+  travel_ += abs(position_ - lastPosition_);
+  lastPosition_ = position_;
+  ++window_;
+
+  const bool legSettled = static_cast<uint32_t>(now - calLegStarted_) >= CAL_LEG_MIN_MS;
+
+  if (window_ >= CAL_STALL_WINDOW) {
+    const int travel = travel_;
+    resetWindow();
+
+    // Привод перестал двигаться — считаем, что дошли до упора.
+    if (legSettled && travel < CAL_STALL_MIN_TRAVEL) {
+      finishCalibrationLeg(now);
+      return;
+    }
+  }
+
+  if (static_cast<uint32_t>(now - calLegStarted_) >= CAL_MOVE_TIMEOUT_MS) {
+    finishCalibrationLeg(now);
+    return;
+  }
+
+  startPulse(calDirection_, PULSE_COARSE_MS, false, now);
+}
+
+void ServoAxis::finishCalibrationLeg(unsigned long now) {
+  holdBrake(now);
+
+  if (calLeg_ == CalLeg::Low) {
+    calLowSeen_ = position_;
+    calLeg_ = CalLeg::High;
+    calDirection_ = Direction::Down;
+    calLegStarted_ = now;
+    resetWindow();
+    return;
+  }
+
+  calibrating_ = false;
+  calLeg_ = CalLeg::None;
+  runtime.calibrating = false;
+
+  const int low = calLowSeen_;
+  const int high = position_;
+
+  if (high - low >= CAL_MIN_SPAN) {
+    adcMin_ = low;
+    adcMax_ = high;
+
+    Settings::instance().saveCalibration(static_cast<uint16_t>(adcMin_),
+                                        static_cast<uint16_t>(adcMax_));
+
+    runtime.calibrated = true;
+    runtime.calMin = adcMin_;
+    runtime.calMax = adcMax_;
+
+    Serial.printf("SERVO: крайние положения %d…%d ADC\n", adcMin_, adcMax_);
+  } else {
+    // Ход подозрительно мал: механика заела или датчик не подключён. Оставляем
+    // прежнюю калибровку (или весь диапазон датчика), а не кривую новую.
+    Serial.printf("SERVO: калибровка не удалась (%d…%d ADC), шкала прежняя\n", low, high);
+  }
+
+  // Уставка пересчитывается по новой шкале.
+  target_ = -1;
+
+  resetWindow();
 }
 
 void ServoAxis::handleRead(unsigned long now) {

@@ -9,6 +9,12 @@
 struct RuntimeStatus {
   bool linkOnline = false;
 
+  // Калибровка крайних положений: идёт сейчас, есть сохранённая, найденный ход.
+  bool calibrating = false;
+  bool calibrated = false;
+  int calMin = 0;
+  int calMax = 0;
+
   int servoPercent = 0;
   int targetAdc = 0;
   int positionAdc = 0;
