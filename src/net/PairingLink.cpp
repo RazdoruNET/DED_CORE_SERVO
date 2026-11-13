@@ -30,15 +30,18 @@ bool PairingLink::pair(CoreCredentials &out, const String &pairCode,
 
   Serial.println("PAIR: ищем сеть сопряжения ядра");
 
-  const int maxCandidates = 16;
-  String ssids[maxCandidates];
-  String bssids[maxCandidates];
-  int rssis[maxCandidates];
+  // Общий дедлайн: перебор кандидатов не должен растягивать одну попытку на
+  // минуты — на это время loop() не обслуживает ни линк с ядром, ни портал.
+  const unsigned long started = millis();
+
+  String ssids[PAIR_MAX_CANDIDATES];
+  String bssids[PAIR_MAX_CANDIDATES];
+  int rssis[PAIR_MAX_CANDIDATES];
   int count = 0;
 
   const int found = WiFi.scanNetworks();
 
-  for (int i = 0; i < found && count < maxCandidates; ++i) {
+  for (int i = 0; i < found && count < PAIR_MAX_CANDIDATES; ++i) {
     if (!WiFi.SSID(i).startsWith(PAIR_AP_PREFIX)) {
       continue;
     }
@@ -90,9 +93,15 @@ bool PairingLink::pair(CoreCredentials &out, const String &pairCode,
   String apBssid;
   bool connected = false;
 
-  const uint32_t perCandidateTimeout = timeoutMs < 8000 ? timeoutMs : 8000;
+  const uint32_t perCandidateTimeout =
+      timeoutMs < PAIR_CANDIDATE_TIMEOUT_MS ? timeoutMs : PAIR_CANDIDATE_TIMEOUT_MS;
 
   for (int candidate = 0; candidate < count && !connected; candidate++) {
+    if (static_cast<uint32_t>(millis() - started) >= timeoutMs) {
+      Serial.println("PAIR: время поиска вышло");
+      break;
+    }
+
     Serial.printf("PAIR: пробуем '%s' (%s)\n", ssids[candidate].c_str(), bssids[candidate].c_str());
 
     WiFi.begin(ssids[candidate].c_str(), pairCode.c_str());

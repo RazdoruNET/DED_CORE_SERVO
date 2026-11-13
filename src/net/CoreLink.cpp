@@ -190,14 +190,17 @@ void CoreLink::handleFrame(const char *payload, size_t length) {
     const char *password = data["pass"];
     const char *host = data["host"];
 
-    if (ssid == nullptr || password == nullptr) {
+    // Пустые поля стёрли бы рабочие настройки: кадр без них не применяем.
+    if (ssid == nullptr || password == nullptr || ssid[0] == '\0' || password[0] == '\0') {
       return;
     }
+
+    const uint16_t port = static_cast<uint16_t>(data["port"] | CORE_DEFAULT_PORT);
 
     pendingSsid_ = ssid;
     pendingPassword_ = password;
     pendingHost_ = host != nullptr ? String(host) : host_;
-    pendingPort_ = static_cast<uint16_t>(data["port"] | CORE_DEFAULT_PORT);
+    pendingPort_ = port != 0 ? port : CORE_DEFAULT_PORT;
     hasPendingCredentials_ = true;
 
     Serial.println("CORE: ядро прислало новые параметры сети");
@@ -211,8 +214,6 @@ void CoreLink::handleFrame(const char *payload, size_t length) {
 
   telemetry_.servoEnabled = data["servo"];
   telemetry_.servoPosition = constrain(static_cast<int>(data["servo_position"] | 0), 0, 255);
-  telemetry_.servoType = data["servo_type"] | 0;
-  telemetry_.servoRpm = data["servo_rpm"] | 0;
 
   ++telemetry_.frames;
   telemetry_.lastFrameMs = millis();

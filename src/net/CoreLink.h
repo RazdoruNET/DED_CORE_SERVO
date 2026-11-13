@@ -9,8 +9,6 @@ struct CoreTelemetry {
   bool valid = false;
   bool servoEnabled = false;
   int servoPosition = 0;  // 0…255, шкала DED CORE V4
-  int servoType = 0;
-  int servoRpm = 0;
   unsigned long frames = 0;
   unsigned long lastFrameMs = 0;
 };
@@ -34,10 +32,6 @@ public:
   bool started() const { return started_; }
   bool connected();
   const CoreTelemetry &telemetry() const { return telemetry_; }
-
-  // Подтверждён ли модуль ядром: только доверенному модулю ядро присылает
-  // новые параметры сети при смене пароля точки доступа.
-  bool authorized() const { return authorized_; }
 
   // Новые параметры сети, присланные ядром. true — ровно один раз на кадр.
   bool takeCredentials(String &ssid, String &password, String &host, uint16_t &port);

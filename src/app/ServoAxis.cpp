@@ -57,6 +57,54 @@ void ServoAxis::setPosition(int percent) {
   runtime.servoPercent = percent;
   runtime.targetAdc = target;
 
+  portENTER_CRITICAL(&stateMux_);
+  pendingTarget_ = target;
+  pendingTargetValid_ = true;
+  portEXIT_CRITICAL(&stateMux_);
+}
+
+void ServoAxis::setLinkOnline(bool online) {
+  portENTER_CRITICAL(&stateMux_);
+  linkOnline_ = online;
+  portEXIT_CRITICAL(&stateMux_);
+}
+
+void ServoAxis::clearFault() {
+  portENTER_CRITICAL(&stateMux_);
+  clearRequested_ = true;
+  portEXIT_CRITICAL(&stateMux_);
+}
+
+void ServoAxis::applyRequests() {
+  int target = 0;
+  bool hasTarget = false;
+  bool clear = false;
+  bool online = false;
+
+  portENTER_CRITICAL(&stateMux_);
+  hasTarget = pendingTargetValid_;
+  target = pendingTarget_;
+  pendingTargetValid_ = false;
+  clear = clearRequested_;
+  clearRequested_ = false;
+  online = linkOnline_;
+  portEXIT_CRITICAL(&stateMux_);
+
+  if (online != linkOnlineSeen_) {
+    linkOnlineSeen_ = online;
+    resetWindow();
+  }
+
+  if (clear) {
+    applyClearRequest();
+  }
+
+  if (hasTarget) {
+    applyTarget(target);
+  }
+}
+
+void ServoAxis::applyTarget(int target) {
   if (target == target_) {
     return;
   }
@@ -76,24 +124,17 @@ void ServoAxis::setPosition(int percent) {
   target_ = target;
 }
 
-void ServoAxis::setLinkOnline(bool online) {
-  if (linkOnline_ == online) {
-    return;
-  }
-
-  linkOnline_ = online;
-  resetWindow();
-
-  if (!online) {
-    holdBrake(millis());
-  }
-}
-
-void ServoAxis::clearFault() {
+void ServoAxis::applyClearRequest() {
   fault_ = FaultCode::None;
   attempts_ = 0;
   latched_ = false;
   retryPending_ = false;
+
+  // Неотправленный отчёт об ошибке снимается вместе с ней: иначе ядро получило
+  // бы кадр servo_error с кодом 0 уже после ручного сброса.
+  portENTER_CRITICAL(&stateMux_);
+  reportPending_ = false;
+  portEXIT_CRITICAL(&stateMux_);
 
   runtime.fault = 0;
   runtime.faultAttempts = 0;
@@ -104,7 +145,9 @@ void ServoAxis::clearFault() {
 void ServoAxis::update() {
   const unsigned long now = millis();
 
-  if (!linkOnline_ || latched_) {
+  applyRequests();
+
+  if (!linkOnlineSeen_ || latched_) {
     holdBrake(now);
     return;
   }
@@ -132,7 +175,10 @@ void ServoAxis::update() {
       }
 
       if (pulseEnded_) {
+        portENTER_CRITICAL(&stateMux_);
         phase_ = Phase::Rest;
+        portEXIT_CRITICAL(&stateMux_);
+
         phaseStarted_ = now;
         phaseDuration_ = phaseBrakeAfter_ ? pulseMs_ : PULSE_COAST_MS;
       }
@@ -140,7 +186,9 @@ void ServoAxis::update() {
 
     case Phase::Rest:
       if (static_cast<uint32_t>(now - phaseStarted_) >= phaseDuration_) {
+        portENTER_CRITICAL(&stateMux_);
         phase_ = Phase::Read;
+        portEXIT_CRITICAL(&stateMux_);
       }
       break;
   }
@@ -202,15 +250,17 @@ void ServoAxis::handleRead(unsigned long now) {
 void ServoAxis::startPulse(Direction direction, uint32_t pulseMs, bool brakeAfter, unsigned long now) {
   pulseMs_ = pulseMs;
   phaseBrakeAfter_ = brakeAfter;
-  pulseEnded_ = false;
 
   // Дедлайн — до перевода фазы в Pulse: запоздавший callback прошлого импульса
   // увидит новую фазу с уже будущим дедлайном и новый импульс не оборвёт.
+  portENTER_CRITICAL(&stateMux_);
   pulseDeadlineUs_ = micros() + pulseMs * 1000;
+  pulseEnded_ = false;
+  phase_ = Phase::Pulse;
+  portEXIT_CRITICAL(&stateMux_);
 
   setOutput(direction, false);
 
-  phase_ = Phase::Pulse;
   phaseStarted_ = now;
   phaseDuration_ = pulseMs;
 
@@ -221,18 +271,31 @@ void ServoAxis::startPulse(Direction direction, uint32_t pulseMs, bool brakeAfte
 }
 
 void ServoAxis::endPulse() {
-  if (phase_ != Phase::Pulse) {
-    return;
-  }
+  bool brakeAfter = false;
+  bool brake = false;
+
+  portENTER_CRITICAL(&stateMux_);
+
+  const bool inPulse = phase_ == Phase::Pulse;
 
   // Запоздавший callback прошлого импульса: дедлайн ещё не наступил.
-  if (static_cast<int32_t>(micros() - pulseDeadlineUs_) < 0) {
+  const bool deadlineReached = static_cast<int32_t>(micros() - pulseDeadlineUs_) >= 0;
+
+  if (inPulse && deadlineReached) {
+    // Линк мог пропасть в середине импульса: тогда тормоз важнее выбега.
+    brake = !linkOnline_ || latched_;
+    brakeAfter = phaseBrakeAfter_;
+
+    pulseEnded_ = true;
+  }
+
+  portEXIT_CRITICAL(&stateMux_);
+
+  if (!inPulse || !deadlineReached) {
     return;
   }
 
-  // Линк мог пропасть в середине импульса: тогда тормоз важнее выбега.
-  setOutput(Direction::None, (!linkOnline_ || latched_) ? true : phaseBrakeAfter_);
-  pulseEnded_ = true;
+  setOutput(Direction::None, brake || brakeAfter);
 }
 
 void ServoAxis::pulseTimerCallback(void *arg) {
@@ -247,17 +310,21 @@ void ServoAxis::holdBrake(unsigned long now) {
   }
 
   // Запоздавший callback не должен вернуть выбег после тормоза.
+  portENTER_CRITICAL(&stateMux_);
   pulseEnded_ = true;
+  phase_ = Phase::Rest;
+  portEXIT_CRITICAL(&stateMux_);
 
   setOutput(Direction::None, true);
 
-  phase_ = Phase::Rest;
   phaseStarted_ = now;
   phaseDuration_ = PULSE_HOLD_MS;
   phaseBrakeAfter_ = true;
 }
 
 void ServoAxis::setOutput(Direction direction, bool brake) {
+  portENTER_CRITICAL(&ioMux_);
+
   const bool up = brake || direction == Direction::Up;
   const bool down = brake || direction == Direction::Down;
 
@@ -270,6 +337,8 @@ void ServoAxis::setOutput(Direction direction, bool brake) {
     digitalWrite(PIN_MOTOR_DOWN, down ? HIGH : LOW);
     outDown_ = down;
   }
+
+  portEXIT_CRITICAL(&ioMux_);
 }
 
 void ServoAxis::resetWindow() {
@@ -282,9 +351,16 @@ void ServoAxis::raiseStall(unsigned long now) {
   ++attempts_;
 
   fault_ = FaultCode::Stall;
-  reportPending_ = true;
 
-  ++runtime.faultsTotal;
+  // Отчёт фиксируется на момент ошибки: если кадр удастся отправить позже,
+  // ядро не должно получить текущее положение вместо того, где привод встал.
+  portENTER_CRITICAL(&stateMux_);
+  reportCode_ = static_cast<uint8_t>(FaultCode::Stall);
+  reportTarget_ = target_;
+  reportPosition_ = position_;
+  reportPending_ = true;
+  portEXIT_CRITICAL(&stateMux_);
+
   runtime.fault = static_cast<uint8_t>(FaultCode::Stall);
   runtime.faultAttempts = attempts_;
 
@@ -321,15 +397,20 @@ int ServoAxis::readPosition() {
 }
 
 bool ServoAxis::takeFaultReport(uint8_t &code, int &target, int &position) {
-  if (!reportPending_) {
-    return false;
+  bool pending = false;
+
+  portENTER_CRITICAL(&stateMux_);
+
+  if (reportPending_) {
+    reportPending_ = false;
+    pending = true;
+
+    code = reportCode_;
+    target = reportTarget_;
+    position = reportPosition_;
   }
 
-  reportPending_ = false;
+  portEXIT_CRITICAL(&stateMux_);
 
-  code = static_cast<uint8_t>(fault_);
-  target = target_;
-  position = position_;
-
-  return true;
+  return pending;
 }

@@ -27,7 +27,8 @@ constexpr int POSITION_COARSE = 500;
 // так привод не проскакивает уставку.
 constexpr int POSITION_NEAR = 200;
 
-// Делитель для коротких импульсов: 1 отсчёт ADC → 1 мс импульса.
+// Делитель для коротких импульсов: 100 отсчётов ADC дают 1 мс импульса
+// (10 отсчётов — 0,1 мс, но импульс короче PULSE_MIN_MS не выдаётся).
 constexpr int POSITION_FINE_DIVISOR = 100;
 
 constexpr uint32_t PULSE_COARSE_MS = 10;
@@ -58,12 +59,15 @@ constexpr uint8_t WS_PONG_MISSES = 2;
 // --- Сопряжение -------------------------------------------------------------
 
 constexpr uint32_t WIFI_RETRY_MS = 20000;
+// Общий бюджет одного поиска сети сопряжения: скан плюс перебор кандидатов.
+// Больше нельзя — на это время loop() не обслуживает ни линк, ни портал.
 constexpr uint32_t PAIR_SCAN_TIMEOUT_MS = 25000;
 constexpr uint32_t PAIR_SCAN_INTERVAL_MS = 20000;
 constexpr uint32_t PAIR_AFTER_LINK_LOSS_MS = 60000;
 
-// Сколько занятых сетей видим в сканировании — столько и обходим.
-constexpr uint16_t WIFI_SCAN_LIMIT = 40;
+// Сколько сетей DED_PAIR_* перебираем за одну попытку и сколько ждём каждую.
+constexpr int PAIR_MAX_CANDIDATES = 16;
+constexpr uint32_t PAIR_CANDIDATE_TIMEOUT_MS = 8000;
 
 // --- Портал настройки -------------------------------------------------------
 

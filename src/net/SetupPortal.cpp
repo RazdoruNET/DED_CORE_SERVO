@@ -2,6 +2,7 @@
 
 #include <ElegantOTA.h>
 #include <WiFi.h>
+#include <esp_random.h>
 
 #include "app/ServoAxis.h"
 #include "app/Status.h"
@@ -12,6 +13,10 @@
 
 namespace {
 
+// Подсеть точки доступа портала: тот же адрес, что в SetupPortal::begin().
+const IPAddress kPortalIp(192, 168, 5, 1);
+const IPAddress kPortalMask(255, 255, 255, 0);
+
 String formParam(AsyncWebServerRequest *request, const char *name) {
   // Второй аргумент true — параметр из тела POST-формы, а не из строки запроса.
   if (!request->hasParam(name, true)) {
@@ -19,6 +24,31 @@ String formParam(AsyncWebServerRequest *request, const char *name) {
   }
 
   return request->getParam(name, true)->value();
+}
+
+String makeCsrfToken() {
+  char token[17];
+  snprintf(token, sizeof(token), "%08lx%08lx",
+           static_cast<unsigned long>(esp_random()),
+           static_cast<unsigned long>(esp_random()));
+
+  return String(token);
+}
+
+// Адрес ядра уходит в socket_.begin() как есть: пробелы и управляющие символы
+// там только ломают подключение.
+bool isValidHost(const String &host) {
+  if (host.length() == 0 || host.length() > 63) {
+    return false;
+  }
+
+  for (size_t i = 0; i < host.length(); ++i) {
+    if (static_cast<unsigned char>(host[i]) <= 0x20) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 String htmlMessage(const String &text) {
@@ -83,6 +113,10 @@ SetupPortal &SetupPortal::instance() {
   return portal;
 }
 
+SetupPortal::SetupPortal() {
+  statusMutex_ = xSemaphoreCreateMutex();
+}
+
 void SetupPortal::begin() {
   if (!active_) {
     // AP+STA: портал может быть открыт, пока модуль уже подключён к ядру,
@@ -94,12 +128,11 @@ void SetupPortal::begin() {
 
     // Своя подсеть: сеть ядра — 192.168.4.0/24, и в AP+STA совпадающие подсети
     // делают маршрут до ядра зависимым от порядка интерфейсов в lwIP.
-    static const IPAddress portalIp(192, 168, 5, 1);
-    WiFi.softAPConfig(portalIp, portalIp, IPAddress(255, 255, 255, 0));
+    WiFi.softAPConfig(kPortalIp, kPortalIp, kPortalMask);
     WiFi.softAP(PORTAL_AP_SSID);
 
     active_ = true;
-    pairingStatus_ = "";
+    setPairingStatus("");
 
     Serial.printf("SETUP: сеть '%s', страница http://%s/\n",
                   PORTAL_AP_SSID, WiFi.softAPIP().toString().c_str());
@@ -133,10 +166,6 @@ void SetupPortal::loop() {
   }
 }
 
-void SetupPortal::requestPairing() {
-  pairingRequested_ = true;
-}
-
 bool SetupPortal::takePairingRequest() {
   if (!pairingRequested_) {
     return false;
@@ -147,19 +176,67 @@ bool SetupPortal::takePairingRequest() {
 }
 
 void SetupPortal::setPairingStatus(const String &text) {
+  if (statusMutex_ != nullptr) {
+    xSemaphoreTake(statusMutex_, portMAX_DELAY);
+  }
+
   pairingStatus_ = text;
+
+  if (statusMutex_ != nullptr) {
+    xSemaphoreGive(statusMutex_);
+  }
+}
+
+String SetupPortal::pairingStatusSnapshot() const {
+  if (statusMutex_ != nullptr) {
+    xSemaphoreTake(statusMutex_, portMAX_DELAY);
+  }
+
+  const String copy = pairingStatus_;
+
+  if (statusMutex_ != nullptr) {
+    xSemaphoreGive(statusMutex_);
+  }
+
+  return copy;
+}
+
+bool SetupPortal::isPortalClient(AsyncWebServerRequest *request) {
+  if (request->client() == nullptr) {
+    return false;
+  }
+
+  const IPAddress clientIp = request->client()->remoteIP();
+
+  return (clientIp & kPortalMask) == (kPortalIp & kPortalMask);
 }
 
 bool SetupPortal::allowRequest(AsyncWebServerRequest *request) const {
-  if (active_) {
+  if (active_ && isPortalClient(request)) {
     return true;
   }
 
-  request->send(403, "text/plain; charset=utf-8", "Setup portal is closed");
+  // В AP+STA портал виден и из сети ядра, а её клиенты не доверены: настройки
+  // меняет только владелец, подключённый к точке доступа портала.
+  request->send(403, "text/plain; charset=utf-8",
+                active_ ? "Setup portal is available from its own network only"
+                        : "Setup portal is closed");
+  return false;
+}
+
+bool SetupPortal::checkCsrf(AsyncWebServerRequest *request) const {
+  if (csrfToken_.length() > 0 && formParam(request, "csrf") == csrfToken_) {
+    return true;
+  }
+
+  request->send(403, "text/html; charset=utf-8",
+                htmlMessage("Форма устарела: обновите страницу портала и повторите."));
   return false;
 }
 
 void SetupPortal::registerRoutes() {
+  csrfToken_ = makeCsrfToken();
+
   server_.on("/", HTTP_GET, [this](AsyncWebServerRequest *request) {
     if (!allowRequest(request)) {
       return;
@@ -177,7 +254,7 @@ void SetupPortal::registerRoutes() {
   });
 
   server_.on("/save", HTTP_POST, [this](AsyncWebServerRequest *request) {
-    if (!allowRequest(request)) {
+    if (!allowRequest(request) || !checkCsrf(request)) {
       return;
     }
 
@@ -214,17 +291,31 @@ void SetupPortal::registerRoutes() {
       return;
     }
 
-    settings.saveCore(ssid,
-                      storedPassword,
-                      host.length() > 0 ? host : String(CORE_DEFAULT_HOST),
-                      port);
+    const String newHost = host.length() > 0 ? host : String(CORE_DEFAULT_HOST);
+
+    if (!isValidHost(newHost)) {
+      request->send(400, "text/html; charset=utf-8",
+                    htmlMessage("Адрес ядра не похож на имя или IP."));
+      return;
+    }
+
+    // Адрес ядра без пароля не меняем: иначе любой клиент открытой точки
+    // доступа увёл бы WebSocket (и токен модуля) на свой сервер.
+    if (password.length() == 0 && (newHost != settings.host() || port != settings.port())) {
+      request->send(400, "text/html; charset=utf-8",
+                    htmlMessage("Чтобы сменить адрес или порт ядра, введите пароль "
+                                "его точки доступа."));
+      return;
+    }
+
+    settings.saveCore(ssid, storedPassword, newHost, port);
 
     request->send(200, "text/html; charset=utf-8", htmlMessage("Сохранено. Перезагрузка…"));
     restartAt_ = millis() + 1500;
   });
 
   server_.on("/paircode", HTTP_POST, [this](AsyncWebServerRequest *request) {
-    if (!allowRequest(request)) {
+    if (!allowRequest(request) || !checkCsrf(request)) {
       return;
     }
 
@@ -237,23 +328,23 @@ void SetupPortal::registerRoutes() {
     }
 
     Settings::instance().savePairCode(code);
-    pairingStatus_ = "Код сохранён. Теперь нажмите «Найти ядро сопряжением».";
+    setPairingStatus("Код сохранён. Теперь нажмите «Найти ядро сопряжением».");
 
     request->redirect("/");
   });
 
-  server_.on("/pair", HTTP_GET, [this](AsyncWebServerRequest *request) {
-    if (!allowRequest(request)) {
+  server_.on("/pair", HTTP_POST, [this](AsyncWebServerRequest *request) {
+    if (!allowRequest(request) || !checkCsrf(request)) {
       return;
     }
 
-    pairingStatus_ = "Ищу сеть сопряжения ядра…";
+    setPairingStatus("Ищу сеть сопряжения ядра…");
     pairingRequested_ = true;
     request->redirect("/");
   });
 
-  server_.on("/fault/clear", HTTP_GET, [this](AsyncWebServerRequest *request) {
-    if (!allowRequest(request)) {
+  server_.on("/fault/clear", HTTP_POST, [this](AsyncWebServerRequest *request) {
+    if (!allowRequest(request) || !checkCsrf(request)) {
       return;
     }
 
@@ -262,7 +353,7 @@ void SetupPortal::registerRoutes() {
   });
 
   server_.on("/reset", HTTP_POST, [this](AsyncWebServerRequest *request) {
-    if (!allowRequest(request)) {
+    if (!allowRequest(request) || !checkCsrf(request)) {
       return;
     }
 
@@ -272,7 +363,7 @@ void SetupPortal::registerRoutes() {
   });
 
   server_.on("/close", HTTP_POST, [this](AsyncWebServerRequest *request) {
-    if (!allowRequest(request)) {
+    if (!allowRequest(request) || !checkCsrf(request)) {
       return;
     }
 
@@ -292,7 +383,7 @@ String SetupPortal::buildPage() const {
   const bool provisioned = settings.provisioned();
 
   String page;
-  page.reserve(3200);
+  page.reserve(4000);
 
   page += "<!DOCTYPE html><html lang=\"ru\"><head><meta charset=\"utf-8\">";
   page += "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
@@ -354,6 +445,9 @@ String SetupPortal::buildPage() const {
   page += "</table>";
 
   page += "<form method=\"post\" action=\"/save\">";
+  page += "<input type=\"hidden\" name=\"csrf\" value=\"";
+  page += csrfToken_;
+  page += "\">";
   page += "<input name=\"ssid\" placeholder=\"Имя точки доступа ядра\" value=\"";
   page += (provisioned ? htmlEscape(settings.ssid()) : String(""));
   page += "\">";
@@ -369,19 +463,37 @@ String SetupPortal::buildPage() const {
   page += "<button type=\"submit\">Сохранить</button></form>";
 
   page += "<form method=\"post\" action=\"/paircode\">";
+  page += "<input type=\"hidden\" name=\"csrf\" value=\"";
+  page += csrfToken_;
+  page += "\">";
   page += "<input name=\"code\" type=\"password\" autocomplete=\"off\" placeholder=\"Код сопряжения из приложения блока\">";
   page += "<button type=\"submit\">Сохранить код</button></form>";
 
-  page += "<a class=\"btn\" href=\"/pair\">Найти ядро сопряжением</a>";
-  page += "<a class=\"btn ghost\" href=\"/fault/clear\">Сбросить ошибку привода</a>";
+  page += "<form method=\"post\" action=\"/pair\">";
+  page += "<input type=\"hidden\" name=\"csrf\" value=\"";
+  page += csrfToken_;
+  page += "\">";
+  page += "<button type=\"submit\">Найти ядро сопряжением</button></form>";
+
+  page += "<form method=\"post\" action=\"/fault/clear\">";
+  page += "<input type=\"hidden\" name=\"csrf\" value=\"";
+  page += csrfToken_;
+  page += "\">";
+  page += "<button class=\"ghost\" type=\"submit\">Сбросить ошибку привода</button></form>";
+
   page += "<a class=\"btn ghost\" href=\"/update\">Обновление прошивки</a>";
 
   page += "<form method=\"post\" action=\"/reset\" onsubmit=\"return confirm('Сбросить настройки ядра?')\">";
+  page += "<input type=\"hidden\" name=\"csrf\" value=\"";
+  page += csrfToken_;
+  page += "\">";
   page += "<button class=\"ghost\" type=\"submit\">Сбросить настройки</button></form>";
 
-  if (pairingStatus_.length() > 0) {
+  const String status = pairingStatusSnapshot();
+
+  if (status.length() > 0) {
     page += "<p class=\"note\">";
-    page += htmlEscape(pairingStatus_);
+    page += htmlEscape(status);
     page += "</p>";
   }
 

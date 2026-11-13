@@ -30,6 +30,8 @@ void runPairing(bool explicitRequest) {
   const String pairCode = settings.pairCode();
 
   if (pairCode.length() < 8) {
+    // Кода нет — сопряжение невозможно; без портала модуль не настроить.
+    SetupPortal::instance().begin();
     SetupPortal::instance().setPairingStatus(
         "Нужен код сопряжения: откройте «Модули» в приложении блока, нажмите "
         "«Найти модуль» и введите показанный код в портале модуля.");
@@ -39,9 +41,19 @@ void runPairing(bool explicitRequest) {
   SetupPortal::instance().setPairingStatus("Ищу сеть сопряжения ядра (DED_PAIR_*)…");
 
   if (!PairingLink::instance().pair(credentials, pairCode, expectedBssid)) {
+    // Код одноразовый: неудача чаще всего значит, что окно закрыто, а код уже
+    // израсходован. Без портала модуль остался бы без линка до десяти
+    // перезагрузок — открываем его сразу, чтобы владелец ввёл новый код.
+    SetupPortal::instance().begin();
     SetupPortal::instance().setPairingStatus(
         "Сеть сопряжения не найдена или код не подошёл. Откройте в приложении "
-        "«Модули» → «Найти модуль» и повторите.");
+        "«Модули» → «Найти модуль», введите новый код и повторите.");
+
+    // Попытка сопряжения увела станцию с сети ядра: возвращаем её на место.
+    if (settings.provisioned()) {
+      WifiLink::instance().begin(settings.ssid(), settings.password());
+    }
+
     return;
   }
 
@@ -51,10 +63,6 @@ void runPairing(bool explicitRequest) {
                     credentials.port);
   settings.saveToken(credentials.token);
   settings.saveBssid(credentials.bssid);
-
-  runtime.coreProvisioned = true;
-  runtime.coreSsid = credentials.ssid;
-  runtime.coreHost = credentials.host;
 
   SetupPortal::instance().setPairingStatus("Ядро найдено: " + credentials.ssid + ". Перезагрузка…");
 
@@ -108,10 +116,6 @@ void applyCoreCredentials() {
   }
 
   Settings::instance().saveCore(ssid, password, host, port);
-
-  runtime.coreSsid = ssid;
-  runtime.coreHost = host;
-  runtime.coreProvisioned = true;
 
   WifiLink::instance().applyCredentials(ssid, password);
 
@@ -193,13 +197,20 @@ void setup() {
   // корпусе рядом с двигателем, лишний нагрев там ни к чему.
   setCpuFrequencyMhz(160);
 
+  // Радио включаем сразу: без Wi-Fi esp_random() выдаёт предсказуемую
+  // последовательность, а на нём строится пароль обновления прошивки.
+  WiFi.mode(WIFI_STA);
+
   Serial.printf("\nDED CORE SERVO %s\n", FIRMWARE_VERSION);
 
   ServoAxis::instance().begin();
 
   // Контур — отдельной задачей: импульсы моста не должны ждать разбора кадров
   // и переподключения WiFi, а loop() занят сетью.
-  xTaskCreatePinnedToCore(TaskServoCode, "ServoAxis", 4096, nullptr, 3, nullptr, 0);
+  if (xTaskCreatePinnedToCore(TaskServoCode, "ServoAxis", 4096, nullptr, 3, nullptr, 0) != pdPASS) {
+    // Без задачи привод не стронется с тормоза: молчать об этом нельзя.
+    Serial.println("SERVO: задача контура не создана, привод не работает");
+  }
 
   Settings &settings = Settings::instance();
   settings.begin();
@@ -208,10 +219,6 @@ void setup() {
   // без сети и без портала настройки.
   const uint8_t failedBoots = settings.failedBoots();
   settings.setFailedBoots(static_cast<uint8_t>(failedBoots + 1));
-
-  runtime.coreProvisioned = settings.provisioned();
-  runtime.coreSsid = settings.ssid();
-  runtime.coreHost = settings.host();
 
   if (!settings.provisioned() || failedBoots >= PORTAL_AFTER_FAILED_BOOTS) {
     Serial.println("SETUP: открыт портал настройки");

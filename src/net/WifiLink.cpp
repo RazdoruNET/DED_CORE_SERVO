@@ -75,14 +75,6 @@ void WifiLink::loop() {
   }
 }
 
-void WifiLink::stop() {
-  ssid_ = "";
-  password_ = "";
-  online_ = false;
-
-  WiFi.disconnect(true);
-}
-
 bool WifiLink::isConnected() const {
   return WiFi.status() == WL_CONNECTED && ssid_.length() > 0;
 }

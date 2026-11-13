@@ -19,7 +19,6 @@ public:
   void applyCredentials(const String &ssid, const String &password);
 
   void loop();
-  void stop();
 
   bool isConnected() const;
   String ip() const;

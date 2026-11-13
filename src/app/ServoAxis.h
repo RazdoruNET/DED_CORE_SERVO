@@ -22,7 +22,8 @@ public:
 
   void begin();
 
-  // Уставка в шкале ядра: 0…255.
+  // Уставка в шкале ядра: 0…255. Вызывается из loop(): сама уставка только
+  // записывается, применяет её задача контура (см. update()).
   void setPosition(int percent);
 
   // Линк с ядром пропал: привод фиксируется тормозом и не двигается,
@@ -51,6 +52,13 @@ private:
 
   int readPosition();
 
+  // Запросы из loop() (уставка, сброс ошибки, состояние линка) переносятся в
+  // состояние контура здесь, в задаче привода: менять его из двух задач сразу
+  // значило бы ловить защёлку с половиной сброшенных полей.
+  void applyRequests();
+  void applyTarget(int target);
+  void applyClearRequest();
+
   void handleRead(unsigned long now);
   void startPulse(Direction direction, uint32_t pulseMs, bool brakeAfter, unsigned long now);
   void holdBrake(unsigned long now);
@@ -63,6 +71,13 @@ private:
   // Wi-Fi-стеком, а длительность импульса от этого зависеть не должна.
   static void pulseTimerCallback(void *arg);
   void endPulse();
+
+  // Состояние фазы и линка делят задача контура и callback таймера.
+  portMUX_TYPE stateMux_ = portMUX_INITIALIZER_UNLOCKED;
+
+  // Выходы моста: setOutput() зовут обе стороны, две записи в пины не должны
+  // перемешиваться.
+  portMUX_TYPE ioMux_ = portMUX_INITIALIZER_UNLOCKED;
 
   Phase phase_ = Phase::Read;
 
@@ -78,7 +93,19 @@ private:
   bool outUp_ = false;
   bool outDown_ = false;
 
+  // Признаки из loop(), защищены stateMux_.
   bool linkOnline_ = false;
+  int pendingTarget_ = 0;
+  bool pendingTargetValid_ = false;
+  bool clearRequested_ = false;
+
+  bool reportPending_ = false;
+  uint8_t reportCode_ = 0;
+  int reportTarget_ = 0;
+  int reportPosition_ = 0;
+
+  // Копия состояния линка в задаче контура: переход ловится здесь.
+  bool linkOnlineSeen_ = false;
 
   int position_ = 0;
   int lastPosition_ = 0;
@@ -94,8 +121,6 @@ private:
 
   bool retryPending_ = false;
   unsigned long retryStarted_ = 0;
-
-  bool reportPending_ = false;
 };
 
 #endif // APP_SERVO_AXIS_H

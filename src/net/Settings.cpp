@@ -26,7 +26,23 @@ Settings &Settings::instance() {
   return settings;
 }
 
+void Settings::lock() const {
+  if (mutex_ != nullptr) {
+    xSemaphoreTakeRecursive(mutex_, portMAX_DELAY);
+  }
+}
+
+void Settings::unlock() const {
+  if (mutex_ != nullptr) {
+    xSemaphoreGiveRecursive(mutex_);
+  }
+}
+
 bool Settings::begin() {
+  if (mutex_ == nullptr) {
+    mutex_ = xSemaphoreCreateRecursiveMutex();
+  }
+
   const bool nvsReady = prefs_.begin(kNamespace, false);
 
   if (nvsReady) {
@@ -53,10 +69,80 @@ bool Settings::begin() {
 }
 
 bool Settings::provisioned() const {
-  return ssid_.length() > 0 && password_.length() >= 8;
+  lock();
+  const bool ready = ssid_.length() > 0 && password_.length() >= 8;
+  unlock();
+
+  return ready;
+}
+
+String Settings::ssid() const {
+  lock();
+  const String value = ssid_;
+  unlock();
+
+  return value;
+}
+
+String Settings::password() const {
+  lock();
+  const String value = password_;
+  unlock();
+
+  return value;
+}
+
+String Settings::host() const {
+  lock();
+  const String value = host_;
+  unlock();
+
+  return value;
+}
+
+uint16_t Settings::port() const {
+  lock();
+  const uint16_t value = port_;
+  unlock();
+
+  return value;
+}
+
+String Settings::token() const {
+  lock();
+  const String value = token_;
+  unlock();
+
+  return value;
+}
+
+String Settings::bssid() const {
+  lock();
+  const String value = bssid_;
+  unlock();
+
+  return value;
+}
+
+String Settings::pairCode() const {
+  lock();
+  const String value = pairCode_;
+  unlock();
+
+  return value;
+}
+
+uint8_t Settings::failedBoots() const {
+  lock();
+  const uint8_t value = failedBoots_;
+  unlock();
+
+  return value;
 }
 
 void Settings::saveCore(const String &ssid, const String &password, const String &host, uint16_t port) {
+  lock();
+
   ssid_ = ssid;
   password_ = password;
   host_ = host;
@@ -68,26 +154,36 @@ void Settings::saveCore(const String &ssid, const String &password, const String
   prefs_.putUShort(kKeyPort, port_);
   setFailedBoots(0);
 
+  unlock();
+
   Serial.printf("SETTINGS: ядро '%s' (%s:%u) сохранено\n",
-                ssid_.c_str(), host_.c_str(), static_cast<unsigned>(port_));
+                ssid.c_str(), host.c_str(), static_cast<unsigned>(port));
 }
 
 void Settings::saveToken(const String &token) {
+  lock();
   token_ = token;
   prefs_.putString(kKeyToken, token_);
+  unlock();
 }
 
 void Settings::saveBssid(const String &bssid) {
+  lock();
   bssid_ = bssid;
   prefs_.putString(kKeyBssid, bssid_);
+  unlock();
 }
 
 void Settings::savePairCode(const String &code) {
+  lock();
   pairCode_ = code;
   prefs_.putString(kKeyPairCode, pairCode_);
+  unlock();
 }
 
 void Settings::clearCore() {
+  lock();
+
   ssid_ = "";
   password_ = "";
   host_ = CORE_DEFAULT_HOST;
@@ -98,20 +194,31 @@ void Settings::clearCore() {
   prefs_.remove(kKeyHost);
   prefs_.remove(kKeyPort);
   prefs_.remove(kKeyBssid);
+
+  // Токен и код сопряжения привязаны к прежнему ядру: после сброса они только
+  // путали бы новое сопряжение.
+  token_ = "";
+  pairCode_ = "";
   bssid_ = "";
+  prefs_.remove(kKeyToken);
+  prefs_.remove(kKeyPairCode);
 
   setFailedBoots(0);
+
+  unlock();
 
   Serial.println("SETTINGS: настройки ядра сброшены");
 }
 
 void Settings::setFailedBoots(uint8_t value) {
-  if (value == failedBoots_) {
-    return;
+  lock();
+
+  if (value != failedBoots_) {
+    failedBoots_ = value;
+    prefs_.putUChar(kKeyFails, failedBoots_);
   }
 
-  failedBoots_ = value;
-  prefs_.putUChar(kKeyFails, failedBoots_);
+  unlock();
 }
 
 void Settings::load() {
@@ -138,10 +245,14 @@ String Settings::makeOtaPassword() {
   // Без похожих символов: пароль набирают вручную с экрана или из лога.
   static const char alphabet[] = "abcdefghijkmnpqrstuvwxyz23456789";
 
-  String password;
-  password.reserve(8);
+  // 12 символов, а не 8: страница обновления отвечает и после закрытия портала,
+  // и подобрать пароль из 40 бит по сети ядра было бы слишком просто.
+  constexpr int kLength = 12;
 
-  for (int i = 0; i < 8; ++i) {
+  String password;
+  password.reserve(kLength);
+
+  for (int i = 0; i < kLength; ++i) {
     password += alphabet[esp_random() % (sizeof(alphabet) - 1)];
   }
 
