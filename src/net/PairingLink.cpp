@@ -8,7 +8,8 @@
 #include "config/PROPS.h"
 
 bool CoreCredentials::valid() const {
-  return ssid.length() > 0 && password.length() >= 8 && host.length() > 0 && port != 0;
+  return ssid.length() > 0 && password.length() >= 8 && host.length() > 0 && port != 0 &&
+         token.length() == 16;
 }
 
 PairingLink &PairingLink::instance() {
@@ -16,8 +17,12 @@ PairingLink &PairingLink::instance() {
   return link;
 }
 
-bool PairingLink::pair(CoreCredentials &out, const String &expectedBssid, uint32_t timeoutMs) {
-  const unsigned long started = millis();
+bool PairingLink::pair(CoreCredentials &out, const String &pairCode,
+                       const String &expectedBssid, uint32_t timeoutMs) {
+  if (pairCode.length() < 8) {
+    Serial.println("PAIR: нет кода сопряжения — сеть ядра закрыта паролем");
+    return false;
+  }
 
   if (WiFi.getMode() == WIFI_OFF) {
     WiFi.mode(WIFI_STA);
@@ -25,64 +30,99 @@ bool PairingLink::pair(CoreCredentials &out, const String &expectedBssid, uint32
 
   Serial.println("PAIR: ищем сеть сопряжения ядра");
 
-  const int found = WiFi.scanNetworks();
-  int best = -1;
-  int bestRssi = -1000;
+  const int maxCandidates = 16;
+  String ssids[maxCandidates];
+  String bssids[maxCandidates];
+  int rssis[maxCandidates];
+  int count = 0;
 
-  for (int i = 0; i < found; ++i) {
+  const int found = WiFi.scanNetworks();
+
+  for (int i = 0; i < found && count < maxCandidates; ++i) {
     if (!WiFi.SSID(i).startsWith(PAIR_AP_PREFIX)) {
       continue;
     }
 
-    // Своё ядро узнаём по BSSID: без этой проверки любая открытая DED_PAIR_*
-    // в радиусе увела бы настроенный модуль на поддельный блок.
+    // Своё ядро узнаём по BSSID: без этой проверки любая DED_PAIR_* в радиусе
+    // увела бы настроенный модуль на поддельный блок.
     const String bssid = WiFi.BSSIDstr(i);
 
     if (expectedBssid.length() > 0 && !bssid.equalsIgnoreCase(expectedBssid)) {
       continue;
     }
 
-    const int rssi = WiFi.RSSI(i);
-
-    if (rssi > bestRssi) {
-      bestRssi = rssi;
-      best = i;
-    }
-  }
-
-  String apSsid;
-  String apBssid;
-
-  if (best >= 0) {
-    apSsid = WiFi.SSID(best);
-    apBssid = WiFi.BSSIDstr(best);
+    ssids[count] = WiFi.SSID(i);
+    bssids[count] = bssid;
+    rssis[count] = WiFi.RSSI(i);
+    count++;
   }
 
   WiFi.scanDelete();
 
-  if (apSsid.length() == 0) {
+  if (count == 0) {
     Serial.println(expectedBssid.length() > 0
                        ? "PAIR: сеть сопряжения этого ядра не найдена"
                        : "PAIR: сеть DED_PAIR_* не найдена");
     return false;
   }
 
-  Serial.printf("PAIR: найдена '%s' (%s), подключаемся\n", apSsid.c_str(), apBssid.c_str());
+  // Сильнейший сигнал пробуем первым, но при ошибке пароля переходим к
+  // следующему кандидату: чужая DED_PAIR_* рядом не должна блокировать своё ядро.
+  for (int i = 0; i < count; i++) {
+    for (int j = i + 1; j < count; j++) {
+      if (rssis[j] > rssis[i]) {
+        const int rssiSwap = rssis[i];
+        rssis[i] = rssis[j];
+        rssis[j] = rssiSwap;
 
-  // Сеть сопряжения открытая: пароля нет по устройству протокола. Секретов,
-  // кроме параметров точки доступа, она не отдаёт и живёт только пока открыто
-  // окно сопряжения в приложении.
-  WiFi.begin(apSsid.c_str());
+        const String ssidSwap = ssids[i];
+        ssids[i] = ssids[j];
+        ssids[j] = ssidSwap;
 
-  while (WiFi.status() != WL_CONNECTED) {
-    if (static_cast<uint32_t>(millis() - started) > timeoutMs) {
-      Serial.println("PAIR: не удалось подключиться к сети сопряжения");
-      WiFi.disconnect(false);
-      return false;
+        const String bssidSwap = bssids[i];
+        bssids[i] = bssids[j];
+        bssids[j] = bssidSwap;
+      }
+    }
+  }
+
+  String apSsid;
+  String apBssid;
+  bool connected = false;
+
+  const uint32_t perCandidateTimeout = timeoutMs < 8000 ? timeoutMs : 8000;
+
+  for (int candidate = 0; candidate < count && !connected; candidate++) {
+    Serial.printf("PAIR: пробуем '%s' (%s)\n", ssids[candidate].c_str(), bssids[candidate].c_str());
+
+    WiFi.begin(ssids[candidate].c_str(), pairCode.c_str());
+
+    const unsigned long attemptStarted = millis();
+
+    while (WiFi.status() != WL_CONNECTED) {
+      if (static_cast<uint32_t>(millis() - attemptStarted) > perCandidateTimeout) {
+        break;
+      }
+
+      delay(100);
     }
 
-    delay(100);
+    if (WiFi.status() == WL_CONNECTED) {
+      connected = true;
+      apSsid = ssids[candidate];
+      apBssid = bssids[candidate];
+    } else {
+      WiFi.disconnect(false);
+      delay(50);
+    }
   }
+
+  if (!connected) {
+    Serial.println("PAIR: не удалось подключиться к сети сопряжения (код не подошёл?)");
+    return false;
+  }
+
+  Serial.printf("PAIR: подключились к '%s' (%s)\n", apSsid.c_str(), apBssid.c_str());
 
   const String url = "http://" + WiFi.gatewayIP().toString() + "/module/pair";
 
@@ -100,12 +140,16 @@ bool PairingLink::pair(CoreCredentials &out, const String &expectedBssid, uint32
       return false;
     }
 
-    const int code = http.GET();
+    // Ядро привязывает токен к MAC модуля: украденный токен не сработает
+    // с другого устройства.
+    http.addHeader("X-Module-Mac", WiFi.macAddress());
 
-    if (code == HTTP_CODE_OK) {
+    const int httpCode = http.GET();
+
+    if (httpCode == HTTP_CODE_OK) {
       payload = http.getString();
     } else {
-      Serial.printf("PAIR: ядро ответило %d\n", code);
+      Serial.printf("PAIR: ядро ответило %d\n", httpCode);
     }
 
     http.end();

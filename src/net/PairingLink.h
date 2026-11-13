@@ -37,7 +37,10 @@ public:
   // expectedBssid: если задан, подходит только точка сопряжения с этим BSSID.
   // Пустая строка — любая сеть DED_PAIR_* (первое сопряжение или явный запуск
   // из портала, когда ядро заменили).
+  // pairCode — код из приложения блока; сеть сопряжения закрыта WPA2-паролем,
+  // выведенным из него. Без кода сопряжение невозможно.
   bool pair(CoreCredentials &out,
+            const String &pairCode,
             const String &expectedBssid = String(),
             uint32_t timeoutMs = PAIR_SCAN_TIMEOUT_MS);
 

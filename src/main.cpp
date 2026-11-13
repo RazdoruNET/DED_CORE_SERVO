@@ -21,18 +21,27 @@ unsigned long g_wifiDownSince = 0;
 
 // explicitRequest — запуск из портала: ищем любое ядро. Автоматически после
 // потери связи ищем только то ядро, с которым уже сопряжены (по BSSID), иначе
-// чужая открытая DED_PAIR_* увела бы модуль на поддельный блок.
+// чужая DED_PAIR_* увела бы модуль на поддельный блок.
 void runPairing(bool explicitRequest) {
   CoreCredentials credentials;
   Settings &settings = Settings::instance();
 
   const String expectedBssid = explicitRequest ? String() : settings.bssid();
+  const String pairCode = settings.pairCode();
+
+  if (pairCode.length() < 8) {
+    SetupPortal::instance().setPairingStatus(
+        "Нужен код сопряжения: откройте «Модули» в приложении блока, нажмите "
+        "«Найти модуль» и введите показанный код в портале модуля.");
+    return;
+  }
 
   SetupPortal::instance().setPairingStatus("Ищу сеть сопряжения ядра (DED_PAIR_*)…");
 
-  if (!PairingLink::instance().pair(credentials, expectedBssid)) {
+  if (!PairingLink::instance().pair(credentials, pairCode, expectedBssid)) {
     SetupPortal::instance().setPairingStatus(
-        "Сеть сопряжения не найдена. Откройте в приложении «Модули» → «Найти модуль» и повторите.");
+        "Сеть сопряжения не найдена или код не подошёл. Откройте в приложении "
+        "«Модули» → «Найти модуль» и повторите.");
     return;
   }
 

@@ -18,6 +18,7 @@ constexpr const char *kKeyFails = "fails";
 constexpr const char *kKeyOtaPass = "otapw";
 constexpr const char *kKeyToken = "mtok";
 constexpr const char *kKeyBssid = "bssid";
+constexpr const char *kKeyPairCode = "paircode";
 }  // namespace
 
 Settings &Settings::instance() {
@@ -81,6 +82,11 @@ void Settings::saveBssid(const String &bssid) {
   prefs_.putString(kKeyBssid, bssid_);
 }
 
+void Settings::savePairCode(const String &code) {
+  pairCode_ = code;
+  prefs_.putString(kKeyPairCode, pairCode_);
+}
+
 void Settings::clearCore() {
   ssid_ = "";
   password_ = "";
@@ -116,6 +122,7 @@ void Settings::load() {
   otaPassword_ = prefs_.getString(kKeyOtaPass, "");
   token_ = prefs_.getString(kKeyToken, "");
   bssid_ = prefs_.getString(kKeyBssid, "");
+  pairCode_ = prefs_.getString(kKeyPairCode, "");
   failedBoots_ = prefs_.getUChar(kKeyFails, 0);
 
   if (host_.length() == 0) {

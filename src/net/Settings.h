@@ -27,9 +27,14 @@ public:
   void saveToken(const String &token);
 
   // BSSID точки сопряжения ядра. По нему автоматическое пересопряжение находит
-  // только своё ядро, а не любую открытую DED_PAIR_* в радиусе.
+  // только своё ядро, а не любую сеть DED_PAIR_* в радиусе.
   const String &bssid() const { return bssid_; }
   void saveBssid(const String &bssid);
+
+  // Код сопряжения из приложения блока. Сеть DED_PAIR_* закрыта WPA2-паролем,
+  // выведенным из этого кода: без него модуль не подключится и не получит пароль ядра.
+  const String &pairCode() const { return pairCode_; }
+  void savePairCode(const String &code);
 
   void saveCore(const String &ssid, const String &password, const String &host, uint16_t port);
   void clearCore();
@@ -53,6 +58,7 @@ private:
   uint16_t port_ = 0;
   String token_;
   String bssid_;
+  String pairCode_;
   String otaPassword_;
 
   // Кэш счётчика: NVS пишется только при изменении значения, иначе «мигающий»

@@ -223,6 +223,25 @@ void SetupPortal::registerRoutes() {
     restartAt_ = millis() + 1500;
   });
 
+  server_.on("/paircode", HTTP_POST, [this](AsyncWebServerRequest *request) {
+    if (!allowRequest(request)) {
+      return;
+    }
+
+    const String code = formParam(request, "code");
+
+    if (code.length() < 8) {
+      request->send(400, "text/html; charset=utf-8",
+                    htmlMessage("Код сопряжения слишком короткий."));
+      return;
+    }
+
+    Settings::instance().savePairCode(code);
+    pairingStatus_ = "Код сохранён. Теперь нажмите «Найти ядро сопряжением».";
+
+    request->redirect("/");
+  });
+
   server_.on("/pair", HTTP_GET, [this](AsyncWebServerRequest *request) {
     if (!allowRequest(request)) {
       return;
@@ -349,6 +368,10 @@ String SetupPortal::buildPage() const {
   page += "\">";
   page += "<button type=\"submit\">Сохранить</button></form>";
 
+  page += "<form method=\"post\" action=\"/paircode\">";
+  page += "<input name=\"code\" type=\"password\" autocomplete=\"off\" placeholder=\"Код сопряжения из приложения блока\">";
+  page += "<button type=\"submit\">Сохранить код</button></form>";
+
   page += "<a class=\"btn\" href=\"/pair\">Найти ядро сопряжением</a>";
   page += "<a class=\"btn ghost\" href=\"/fault/clear\">Сбросить ошибку привода</a>";
   page += "<a class=\"btn ghost\" href=\"/update\">Обновление прошивки</a>";
@@ -362,8 +385,9 @@ String SetupPortal::buildPage() const {
     page += "</p>";
   }
 
-  page += "<p class=\"note\">Сопряжение: в приложении блока откройте «Модули» и нажмите "
-          "«Найти модуль», затем нажмите «Найти ядро сопряжением». Сеть сопряжения живёт около минуты.</p>";
+  page += "<p class=\"note\">Сопряжение: в приложении блока откройте «Модули», нажмите "
+          "«Найти модуль» и запишите код. Введите код выше, нажмите «Сохранить код», "
+          "затем «Найти ядро сопряжением». Сеть сопряжения закрыта кодом и живёт около трёх минут.</p>";
 
   // Обновляем страницу, только пока в неё не вводят: автообновление стирало
   // набранный пароль.
