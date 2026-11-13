@@ -5,7 +5,6 @@
 #include "app/Status.h"
 #include "config/CONFIG.h"
 #include "config/PINS.h"
-#include "net/Settings.h"
 
 namespace {
 
@@ -20,7 +19,7 @@ ServoAxis &ServoAxis::instance() {
   return axis;
 }
 
-void ServoAxis::begin() {
+void ServoAxis::begin(int adcMin, int adcMax, bool calibrated) {
   pinMode(PIN_MOTOR_UP, OUTPUT);
   pinMode(PIN_MOTOR_DOWN, OUTPUT);
   pinMode(PIN_DRIVER_ENABLE, OUTPUT);
@@ -44,14 +43,12 @@ void ServoAxis::begin() {
 
   // Шкала ядра ложится на найденный при первом включении ход. Пока калибровки
   // нет, работает весь диапазон датчика — как у заводской прошивки.
-  Settings &settings = Settings::instance();
-
-  if (settings.calibrated()) {
-    adcMin_ = settings.adcMin();
-    adcMax_ = settings.adcMax();
+  if (calibrated) {
+    adcMin_ = adcMin;
+    adcMax_ = adcMax;
   }
 
-  runtime.calibrated = settings.calibrated();
+  runtime.calibrated = calibrated;
   runtime.calMin = adcMin_;
   runtime.calMax = adcMax_;
 
@@ -63,7 +60,7 @@ void ServoAxis::begin() {
   runtime.targetAdc = target_;
 
   // Первое включение: крайние положения ещё не известны.
-  if (!settings.calibrated()) {
+  if (!calibrated) {
     calRequested_ = true;
   }
 }
@@ -273,38 +270,64 @@ void ServoAxis::beginCalibration() {
   runtime.faultAttempts = 0;
   runtime.calibrating = true;
 
+  // Калибровка снимает неисправность: неотправленный отчёт о ней уже неактуален.
+  portENTER_CRITICAL(&stateMux_);
+  reportPending_ = false;
+  portEXIT_CRITICAL(&stateMux_);
+
   resetWindow();
 
   Serial.println("SERVO: калибровка крайних положений");
 }
 
 void ServoAxis::handleCalibrationRead(unsigned long now) {
+  lastPosition_ = position_;
   position_ = readPosition();
   runtime.positionAdc = position_;
 
-  travel_ += abs(position_ - lastPosition_);
-  lastPosition_ = position_;
+  if (window_ == 0) {
+    calWindowStart_ = position_;
+  }
+
   ++window_;
 
   const bool legSettled = static_cast<uint32_t>(now - calLegStarted_) >= CAL_LEG_MIN_MS;
 
   if (window_ >= CAL_STALL_WINDOW) {
-    const int travel = travel_;
+    const int moved = abs(position_ - calWindowStart_);
     resetWindow();
 
-    // Привод перестал двигаться — считаем, что дошли до упора.
-    if (legSettled && travel < CAL_STALL_MIN_TRAVEL) {
+    // Упор: за окно привод не сдвинулся. Сравниваем начало и конец окна, а не
+    // сумму приращений — шум датчика в сумме выглядит как движение.
+    if (legSettled && moved < CAL_STALL_MIN_TRAVEL) {
       finishCalibrationLeg(now);
       return;
     }
   }
 
   if (static_cast<uint32_t>(now - calLegStarted_) >= CAL_MOVE_TIMEOUT_MS) {
-    finishCalibrationLeg(now);
+    // Упор не найден за отведённое время: привод не тянет, механика заела или
+    // датчик врёт. Записать часть хода как весь ход нельзя — отбрасываем.
+    abortCalibration(now);
     return;
   }
 
   startPulse(calDirection_, PULSE_COARSE_MS, false, now);
+}
+
+void ServoAxis::abortCalibration(unsigned long now) {
+  holdBrake(now);
+
+  calibrating_ = false;
+  calLeg_ = CalLeg::None;
+  runtime.calibrating = false;
+
+  target_ = position_;
+  runtime.targetAdc = target_;
+
+  resetWindow();
+
+  Serial.println("SERVO: калибровка: упор не найден за отведённое время, шкала прежняя");
 }
 
 void ServoAxis::finishCalibrationLeg(unsigned long now) {
@@ -330,12 +353,17 @@ void ServoAxis::finishCalibrationLeg(unsigned long now) {
     adcMin_ = low;
     adcMax_ = high;
 
-    Settings::instance().saveCalibration(static_cast<uint16_t>(adcMin_),
-                                        static_cast<uint16_t>(adcMax_));
-
     runtime.calibrated = true;
     runtime.calMin = adcMin_;
     runtime.calMax = adcMax_;
+
+    // В NVS записывает loop(): задача контура flash не трогает, иначе импульсы
+    // ждали бы стирания страницы.
+    portENTER_CRITICAL(&stateMux_);
+    pendingAdcMin_ = adcMin_;
+    pendingAdcMax_ = adcMax_;
+    calibrationPending_ = true;
+    portEXIT_CRITICAL(&stateMux_);
 
     Serial.printf("SERVO: крайние положения %d…%d ADC\n", adcMin_, adcMax_);
   } else {
@@ -344,8 +372,10 @@ void ServoAxis::finishCalibrationLeg(unsigned long now) {
     Serial.printf("SERVO: калибровка не удалась (%d…%d ADC), шкала прежняя\n", low, high);
   }
 
-  // Уставка пересчитывается по новой шкале.
-  target_ = -1;
+  // Держим текущее положение: уставка пересчитается по новой шкале, когда
+  // придёт следующий кадр ядра, и привод не поедет к устаревшему значению.
+  target_ = position_;
+  runtime.targetAdc = target_;
 
   resetWindow();
 }
@@ -564,6 +594,24 @@ bool ServoAxis::takeFaultReport(uint8_t &code, int &target, int &position) {
     code = reportCode_;
     target = reportTarget_;
     position = reportPosition_;
+  }
+
+  portEXIT_CRITICAL(&stateMux_);
+
+  return pending;
+}
+
+bool ServoAxis::takeCalibration(int &adcMin, int &adcMax) {
+  bool pending = false;
+
+  portENTER_CRITICAL(&stateMux_);
+
+  if (calibrationPending_) {
+    calibrationPending_ = false;
+    pending = true;
+
+    adcMin = pendingAdcMin_;
+    adcMax = pendingAdcMax_;
   }
 
   portEXIT_CRITICAL(&stateMux_);

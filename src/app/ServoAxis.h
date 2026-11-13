@@ -22,7 +22,9 @@ class ServoAxis {
 public:
   static ServoAxis &instance();
 
-  void begin();
+  // adcMin/adcMax — сохранённые крайние положения, calibrated == false —
+  // калибровки ещё нет, её найдёт задача контура при первом включении.
+  void begin(int adcMin, int adcMax, bool calibrated);
 
   // Уставка в шкале ядра: 0…255. Вызывается из loop(): сама уставка только
   // записывается, применяет её задача контура (см. update()).
@@ -42,13 +44,12 @@ public:
   // Шаг контура. Вызывается из задачи каждые CONTROL_TICK_MS.
   void update();
 
-  int position() const { return position_; }
-  int target() const { return target_; }
-  bool faulted() const { return fault_ != FaultCode::None; }
-  uint8_t faultCode() const { return static_cast<uint8_t>(fault_); }
-
   // Забрать событие ошибки для отправки ядру. true — ровно один раз на ошибку.
   bool takeFaultReport(uint8_t &code, int &target, int &position);
+
+  // Забрать найденные крайние положения для записи в NVS: контур не хранит
+  // ничего сам, а flash из задачи привода не пишется. true — ровно один раз.
+  bool takeCalibration(int &adcMin, int &adcMax);
 
 private:
   enum class Phase : uint8_t { Read, Pulse, Rest };
@@ -71,6 +72,7 @@ private:
   void beginCalibration();
   void handleCalibrationRead(unsigned long now);
   void finishCalibrationLeg(unsigned long now);
+  void abortCalibration(unsigned long now);
 
   void runPhase(unsigned long now);
 
@@ -120,6 +122,10 @@ private:
   int reportTarget_ = 0;
   int reportPosition_ = 0;
 
+  bool calibrationPending_ = false;
+  int pendingAdcMin_ = 0;
+  int pendingAdcMax_ = 0;
+
   // Копия состояния линка в задаче контура: переход ловится здесь.
   bool linkOnlineSeen_ = false;
 
@@ -132,6 +138,7 @@ private:
   Direction calDirection_ = Direction::Up;
   unsigned long calLegStarted_ = 0;
   int calLowSeen_ = 0;
+  int calWindowStart_ = 0;
 
   int position_ = 0;
   int lastPosition_ = 0;

@@ -182,6 +182,21 @@ void reportFaults() {
   core.reportServoError(code, target, position);
 }
 
+// Найденные контуром крайние положения пишем в NVS здесь, а не в задаче привода:
+// стирание страницы flash занимает десятки миллисекунд, и импульсы моста ждать
+// его не должны.
+void saveCalibration() {
+  int adcMin = 0;
+  int adcMax = 0;
+
+  if (!ServoAxis::instance().takeCalibration(adcMin, adcMax)) {
+    return;
+  }
+
+  Settings::instance().saveCalibration(static_cast<uint16_t>(adcMin),
+                                       static_cast<uint16_t>(adcMax));
+}
+
 }  // namespace
 
 void setup() {
@@ -208,7 +223,11 @@ void setup() {
   Settings &settings = Settings::instance();
   settings.begin();
 
-  ServoAxis::instance().begin();
+  const bool calibrated = settings.calibrated();
+
+  ServoAxis::instance().begin(calibrated ? settings.adcMin() : 0,
+                              calibrated ? settings.adcMax() : POSITION_ADC_MAX,
+                              calibrated);
 
   // Контур — отдельной задачей: импульсы моста не должны ждать разбора кадров
   // и переподключения WiFi, а loop() занят сетью.
@@ -255,5 +274,6 @@ void loop() {
   updateLinkState();
   applyTelemetry();
   reportFaults();
+  saveCalibration();
   schedulePairing();
 }
